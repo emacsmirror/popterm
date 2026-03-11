@@ -285,16 +285,30 @@ popping a window or disturbing the current layout."
 
 ;;; ── Scope / project helpers ───────────────────────────────────────────────────
 
+(defun popterm--buffer-directory (&optional buffer)
+  "Return BUFFER's directory as an absolute path string, or nil.
+Prefers `buffer-file-name' and falls back to `default-directory'.  This
+helper is defensive for special buffers where `default-directory' may be
+nil, such as `*Messages*'."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((dir (or (and buffer-file-name
+                        (file-name-directory buffer-file-name))
+                   default-directory)))
+      (when (stringp dir)
+        (expand-file-name dir)))))
+
 (defun popterm--project-root ()
   "Return the current project root directory string, or nil.
-Uses `project-root' (project.el >= 0.3.0).  If the project backend
-does not implement `project-root', returns nil gracefully."
+Uses `project-root' (project.el >= 0.3.0).  If the current buffer has no
+usable directory, or the project backend does not implement
+`project-root', return nil gracefully."
   ;; `project-roots' was deprecated in project.el 0.3.0 (Emacs 28).
   ;; We require Emacs 28.1, so `project-root' is always available.
-  (when-let* ((proj (and (fboundp 'project-current)
-                         (project-current))))
+  (when-let* ((dir  (popterm--buffer-directory))
+              (proj (and (fboundp 'project-current)
+                         (ignore-errors (project-current nil dir)))))
     (when (fboundp 'project-root)
-      (project-root proj))))
+      (ignore-errors (project-root proj)))))
 
 (defun popterm--not-in-other-frame (cur-frame buf)
   "Non-nil when BUF is not displayed in a frame other than CUR-FRAME."
@@ -319,10 +333,8 @@ does not implement `project-root', returns nil gracefully."
                                     (popterm--buffer-name nil b)))
               ('frame      (popterm--not-in-other-frame frame buf))
               ('project    (and root
-                                (with-current-buffer buf
-                                  (string-prefix-p
-                                   root
-                                   (expand-file-name default-directory))))))))
+                                (when-let ((dir (popterm--buffer-directory buf)))
+                                  (string-prefix-p root dir)))))))
      (buffer-list))))
 
 (defun popterm--get-or-create (&optional name backend)
@@ -345,17 +357,15 @@ Guards against a killed-but-not-yet-GC'd buffer by verifying
 (defun popterm-cd-string (source-buf)
   "Return a shell cd command string for the directory of SOURCE-BUF.
 Strips the TRAMP remote prefix so the command is valid on the remote host.
-Side-effect-free; part of the public API for custom integrations.
+Returns nil when SOURCE-BUF has no usable directory.  Side-effect-free;
+part of the public API for custom integrations.
 
 This function uses `file-remote-p' when available and does not require TRAMP
 at load time."
-  (with-current-buffer source-buf
-    (let* ((dir    (or (and buffer-file-name
-                            (file-name-directory buffer-file-name))
-                       default-directory))
-           (remote (file-remote-p dir))
-           (local  (if remote (file-remote-p dir 'localname) dir)))
-      (format "cd %s" (shell-quote-argument (directory-file-name local))))))
+  (when-let* ((dir    (popterm--buffer-directory source-buf))
+              (remote (file-remote-p dir))
+              (local  (if remote (file-remote-p dir 'localname) dir)))
+    (format "cd %s" (shell-quote-argument (directory-file-name local)))))
 
 (defun popterm--send-cd (term-buf source-buf)
   "Send a cd command into TERM-BUF based on SOURCE-BUF's directory.
@@ -363,30 +373,30 @@ Uses each backend's dedicated send + return API to avoid PTY newline
 issues: raw \\n is unreliable over a PTY (zsh/fish expect \\r).
 `vterm-send-return' and `eat-self-input' with symbol `return' are the
 correct idioms for their respective backends."
-  (when (buffer-live-p source-buf)
-    (let ((cmd (popterm-cd-string source-buf)))
-      (with-current-buffer term-buf
-        (cond
-         ((and (derived-mode-p 'vterm-mode)
-               (fboundp 'vterm-send-string)
-               (fboundp 'vterm-send-return))
-          (vterm-send-string cmd)
-          (vterm-send-return))
-         ((and (derived-mode-p 'eat-mode)
-               (fboundp 'eat-term-send-string)
-               (fboundp 'eat-self-input)
-               (boundp 'eat-terminal)
-               eat-terminal)
-          (eat-term-send-string eat-terminal cmd)
-          (eat-self-input 1 'return))
-         ((derived-mode-p 'comint-mode)
-          (goto-char (point-max))
-          (insert cmd)
-          (comint-send-input))
-         ((derived-mode-p 'eshell-mode)
-          (goto-char (point-max))
-          (insert cmd)
-          (with-no-warnings (eshell-send-input))))))))
+  (when-let ((cmd (and (buffer-live-p source-buf)
+                       (popterm-cd-string source-buf))))
+    (with-current-buffer term-buf
+      (cond
+       ((and (derived-mode-p 'vterm-mode)
+             (fboundp 'vterm-send-string)
+             (fboundp 'vterm-send-return))
+        (vterm-send-string cmd)
+        (vterm-send-return))
+       ((and (derived-mode-p 'eat-mode)
+             (fboundp 'eat-term-send-string)
+             (fboundp 'eat-self-input)
+             (boundp 'eat-terminal)
+             eat-terminal)
+        (eat-term-send-string eat-terminal cmd)
+        (eat-self-input 1 'return))
+       ((derived-mode-p 'comint-mode)
+        (goto-char (point-max))
+        (insert cmd)
+        (comint-send-input))
+       ((derived-mode-p 'eshell-mode)
+        (goto-char (point-max))
+        (insert cmd)
+        (with-no-warnings (eshell-send-input)))))))
 
 ;;; ── Posframe display ─────────────────────────────────────────────────────────
 
