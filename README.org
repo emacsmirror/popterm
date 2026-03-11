@@ -1,0 +1,354 @@
+#+TITLE: popterm.el
+#+AUTHOR: ckaiatwork
+#+DESCRIPTION: A smart, posframe-based terminal toggler for Emacs.
+
+* popterm.el
+
+*A smart, posframe-based terminal toggler for Emacs.*
+
+~popterm~ merges the best paradigms of modern Emacs terminal management into a
+single bullet-proof package. It combines the aesthetic centered child-frames, the named-instance multiplexing of ~toggle-term.el~, and the TRAMP-aware scope-locking of ~vterm-toggle~.
+
+Whether you use ~vterm~, ~eat~, ~shell~, or ~eshell~, ~popterm~ provides a
+flawless, context-aware pop-up terminal experience that respects your window
+layouts, asynchronous compositor events, and background processes.
+
+** ✨ Features
+
+- *Multiple Display Backends:* Choose between a centered ~posframe~ child-frame,
+  a bottom ~window~ split, or a ~fullscreen~ takeover.
+- *Agnostic Terminal Support:* Seamlessly supports ~vterm~, ~eat~, ~shell~, and
+  ~eshell~ out of the box. No hard dependencies required—it auto-detects what
+  you have installed.
+- *Smart Auto-CD & TRAMP Awareness:* Automatically changes the terminal
+  directory to match the buffer you toggled it from. It correctly parses TRAMP
+  remote paths so SSH commands execute safely on the remote host without local
+  prefix mangling.
+- *Named Instances & Scope Control:* Run multiple terminal instances (e.g.,
+  "build", "server", "repl") and restrict their cycling scope to the current
+  ~project~, the current ~frame~, or globally.
+- *Solid State Management:*
+  - Safely overrides ~display-buffer-alist~ to prevent terminal initialization
+    artifacts (like 0×0 PTY grids).
+  - Reliably injects keybindings through ~vterm~'s character-mode input traps
+    via ~vterm-keymap-exceptions~.
+
+** 📦 Installation
+
+~popterm~ requires Emacs 28.1+ and the [[https://github.com/tumashu/posframe][posframe]] package.
+
+*** straight.el / elpaca
+
+#+BEGIN_SRC emacs-lisp
+(use-package popterm
+  :straight (popterm :type git :host github :repo "CsBigDataHub/popterm.el")
+  :bind (("C-`"   . popterm-toggle)
+         ("C-~"   . popterm-toggle-cd)
+         ([f9]    . popterm-window-toggle))
+  :config
+  (setq popterm-backend        'vterm     ; or 'eat, 'shell, 'eshell
+        popterm-display-method 'posframe  ; or 'window, 'fullscreen
+        popterm-scope          'project   ; or 'frame, 'dedicated, nil
+        popterm-auto-cd        t))
+#+END_SRC
+
+*** Manual
+
+Clone the repository and add the directory to your ~load-path~:
+
+#+BEGIN_SRC emacs-lisp
+(add-to-list 'load-path "~/.emacs.d/site-lisp/popterm/")
+(require 'popterm)
+#+END_SRC
+
+*** Dependencies
+
+| Package   | Required? | Purpose                          |
+|-----------+-----------+----------------------------------|
+| ~posframe~  | Required  | Child-frame rendering            |
+| ~vterm~     | Optional  | vterm backend                    |
+| ~eat~       | Optional  | eat backend                      |
+| ~project~   | Built-in  | Project-scoped buffer resolution |
+| ~tramp~     | Built-in  | Remote path stripping for auto-cd |
+
+** 🚀 Usage
+
+*** Global Commands
+
+| Command                  | Default Binding | Description                                              |
+|--------------------------+-----------------+----------------------------------------------------------|
+| ~popterm-toggle~           | ~C-`~           | Toggle the default terminal popup                        |
+| ~popterm-toggle-cd~        | ~C-~~           | Toggle and ~cd~ to the originating buffer's directory    |
+| ~popterm-toggle-named~     | ~C-c t n~       | Toggle a named instance, e.g. ~build~, ~server~, ~repl~ |
+| ~popterm-window-toggle~    | ~f9~            | Force a bottom window split regardless of display method |
+| ~popterm-posframe-toggle~  | —               | Force posframe regardless of display method              |
+| ~popterm-find~             | ~C-c t f~       | ~completing-read~ picker over all active popterm buffers |
+| ~popterm-vterm~            | —               | Toggle a vterm popup regardless of ~popterm-backend~     |
+| ~popterm-eat~              | —               | Toggle an eat popup regardless of ~popterm-backend~      |
+| ~popterm-shell~            | —               | Toggle a shell popup regardless of ~popterm-backend~     |
+| ~popterm-eshell~           | —               | Toggle an eshell popup regardless of ~popterm-backend~   |
+
+*** Inside the Terminal (~popterm-mode~)
+
+When inside any ~popterm~ buffer, a minor mode activates navigation bindings
+that bypass both vterm and eat's character-mode input traps (see
+[[*How the vterm Keymap Trap Is Solved][How the vterm Keymap Trap Is Solved]]):
+
+| Binding     | Command          | Description                                         |
+|-------------+------------------+-----------------------------------------------------|
+| ~C-<next>~  | ~popterm-next~   | Cycle forward through terminals in the current scope |
+| ~C-<prior>~ | ~popterm-prev~   | Cycle backward                                       |
+| ~C-q~       | ~popterm-return~ | Hide and return to the originating source buffer     |
+
+*** Named Instances
+
+~popterm~ supports running multiple isolated terminal instances simultaneously.
+Buffers are named ~*popterm-BACKEND[NAME]*~:
+
+#+BEGIN_SRC emacs-lisp
+;; Open or toggle a terminal named "build"
+(popterm-toggle "build")
+
+;; Bind named instances to dedicated keys
+(global-set-key (kbd "C-c t b") (lambda () (interactive) (popterm-toggle "build")))
+(global-set-key (kbd "C-c t s") (lambda () (interactive) (popterm-toggle "server")))
+(global-set-key (kbd "C-c t r") (lambda () (interactive) (popterm-toggle "repl")))
+#+END_SRC
+
+Inside the terminal, use ~C-<next>~ and ~C-<prior>~ to cycle between all
+instances in your current scope.
+
+** ⚙️ Configuration
+
+~popterm~ is fully customizable via ~M-x customize-group RET popterm RET~ or
+via ~setq~ in your init file.
+
+*** Display Method
+
+#+BEGIN_SRC emacs-lisp
+;; Centered child frame (default, requires posframe)
+(setq popterm-display-method 'posframe)
+
+;; Bottom split window
+(setq popterm-display-method 'window)
+
+;; Full-frame takeover
+(setq popterm-display-method 'fullscreen)
+#+END_SRC
+
+*** Terminal Backend
+
+#+BEGIN_SRC emacs-lisp
+(setq popterm-backend 'vterm)   ; 'vterm | 'eat | 'shell | 'eshell
+#+END_SRC
+
+*** Posframe Geometry
+
+#+BEGIN_SRC emacs-lisp
+(setq popterm-posframe-width-ratio  0.62)  ; fraction of frame width
+(setq popterm-posframe-height-ratio 0.62)  ; fraction of frame height
+(setq popterm-posframe-min-width    100)   ; minimum column width
+(setq popterm-posframe-border-width 3)     ; border in pixels
+
+;; Use a custom poshandler for a different position, e.g. bottom-center:
+(setq popterm-posframe-poshandler #'posframe-poshandler-frame-bottom-center)
+#+END_SRC
+
+*** Window Split Geometry
+
+#+BEGIN_SRC emacs-lisp
+(setq popterm-window-height-ratio 0.30)    ; fraction of frame height
+(setq popterm-window-side         'below)  ; 'below | 'above | 'left | 'right
+#+END_SRC
+
+*** Scope Control
+
+#+BEGIN_SRC emacs-lisp
+;; Reuse any open popterm buffer (default)
+(setq popterm-scope nil)
+
+;; Only reuse buffers associated with the current project
+(setq popterm-scope 'project)
+
+;; Only reuse buffers not visible in another frame
+(setq popterm-scope 'frame)
+
+;; Always use exactly one buffer per backend (ignores named instances)
+(setq popterm-scope 'dedicated)
+#+END_SRC
+
+*** Auto-CD & Creation Behavior
+
+#+BEGIN_SRC emacs-lisp
+;; Always cd to the source buffer's directory on every toggle
+(setq popterm-auto-cd t)
+
+;; Allow popterm-toggle-cd to create a new terminal when none exists in scope
+(setq popterm-cd-auto-create-buffer t)
+#+END_SRC
+
+*** Wayland / pgtk Focus Delay
+
+On slow Wayland compositors the async focus-transfer window may exceed the
+default 0.35 second guard. Increase ~popterm-posframe-focus-delay~ if the
+posframe occasionally re-hides itself immediately after opening:
+
+#+BEGIN_SRC emacs-lisp
+(setq popterm-posframe-focus-delay 0.5)
+#+END_SRC
+
+** 🏗 Architecture & Design Notes
+
+*** How the vterm Keymap Trap Is Solved
+
+~vterm~ (and ~eat~) intercept keystrokes at the process-filter level, before
+Emacs's minor-mode keymap lookup ever runs. ~popterm~ solves this by registering
+its navigation keys in ~vterm-keymap-exceptions~ at load time:
+
+#+BEGIN_SRC emacs-lisp
+(with-eval-after-load 'vterm
+  (dolist (key popterm--vterm-passthrough-keys)
+    (add-to-list 'vterm-keymap-exceptions key)))
+#+END_SRC
+
+This instructs libvterm to hand the key back to Emacs rather than forwarding it
+to the underlying PTY.
+
+*** How the Wayland Focus Race Is Solved
+
+The standard posframe hidehandler uses ~run-with-idle-timer~ and polls
+~(selected-frame)~. On Wayland/pgtk, focus transfer is asynchronous at the
+compositor level, meaning ~(selected-frame)~ can still return the parent frame
+during the idle callback immediately after a ~posframe-show~ call.
+
+~popterm~ bypasses this entirely by replacing the hidehandler with:
+
+1. ~after-focus-change-function~ — an Emacs 27+ hook that fires *after* Emacs
+   has processed the actual compositor focus event, not on an idle poll.
+2. ~frame-focus-state~ — a pgtk-native function that queries the Wayland
+   compositor directly for the real focus state of a specific frame.
+3. A cancel-before-spawn inhibit timer (~popterm-posframe-focus-delay~ seconds)
+   stored in ~popterm--focus-timer~ to prevent ghost timers from rapid key-repeat
+   within the focus window.
+
+*** How PTY Initialization Artifacts Are Prevented
+
+~vterm~ and ~eat~ call ~pop-to-buffer~ internally, which would normally disrupt
+the active window layout. ~popterm~ overrides ~display-buffer-alist~ dynamically
+during buffer creation to force ~display-buffer-no-window~, keeping the current
+layout intact while still allowing the PTY to query correct frame dimensions for
+its initial grid size:
+
+#+BEGIN_SRC emacs-lisp
+(let ((display-buffer-alist
+       '((".*" (display-buffer-no-window) (allow-no-window . t)))))
+  (save-current-buffer
+    ;; terminal constructor called here
+    ))
+#+END_SRC
+
+This is preferable to ~save-window-excursion~, which hides window dimensions and
+can produce a 0×0 initial PTY grid.
+
+*** How Dead Source Buffers Are Handled
+
+When ~popterm-return~ is called, ~popterm~ distinguishes between display modes
+to avoid a "friendly-fire" ~bury-buffer~ trap:
+
+- *Fullscreen:* The terminal is still the ~current-buffer~ when hide runs, so
+  ~bury-buffer~ correctly targets the terminal.
+- *Posframe/Window:* ~popterm--hide~ has already transferred focus back to the
+  parent frame before the return logic runs. Calling ~bury-buffer~ here would
+  accidentally bury the user's code file. ~popterm~ emits a message instead and
+  leaves the workspace untouched.
+
+** 🔍 Troubleshooting
+
+*** Posframe closes immediately after opening
+
+You are likely on Wayland/pgtk. Increase the focus delay guard:
+
+#+BEGIN_SRC emacs-lisp
+(setq popterm-posframe-focus-delay 0.5)
+#+END_SRC
+
+*** ~C-q~ / ~C-<next>~ not working inside vterm
+
+Ensure ~vterm-keymap-exceptions~ contains the keys. ~popterm~ registers them
+automatically via ~with-eval-after-load 'vterm~, so ~vterm~ must be loaded
+*after* ~popterm~. If you load ~vterm~ eagerly before ~popterm~, add manually:
+
+#+BEGIN_SRC emacs-lisp
+(with-eval-after-load 'vterm
+  (dolist (key '("C-<next>" "C-<prior>" "C-q"))
+    (add-to-list 'vterm-keymap-exceptions key)))
+#+END_SRC
+
+*** Terminal opens as a blank buffer (eat backend)
+
+This occurs if ~eat-buffer-name~ is not respected by your version of ~eat~.
+Check that your ~eat~ package is up to date (NonGNU ELPA or Codeberg ~master~
+branch). ~popterm~ binds ~eat-buffer-name~ before calling ~(eat)~ and fetches
+the buffer by name afterward — both steps require a current ~eat~.
+
+*** Auto-cd does not work on remote (TRAMP) buffers
+
+~popterm~ strips the TRAMP remote prefix from the path before sending the ~cd~
+command, so the command is valid on the remote host. Verify with:
+
+#+BEGIN_SRC emacs-lisp
+(popterm-cd-string (current-buffer))  ; should return "cd /remote/local/path"
+#+END_SRC
+
+If the path still contains the TRAMP prefix, your TRAMP connection may not
+have a ~localname~ component. File a bug with the output of the above.
+
+*** Named instances are not found after a session restart
+
+~popterm~ does not persist buffer state across Emacs restarts. Named instance
+buffers must be re-created each session. Use ~popterm-find~ (~M-x popterm-find~)
+to survey all active instances at any time.
+
+** 📊 Comparison with Similar Packages
+
+| Feature                        | ~popterm~      | ~vterm-toggle~ | ~toggle-term~  |
+|--------------------------------+----------------+----------------+----------------|
+| Posframe child-frame display   | ✅             | ❌             | ❌             |
+| Window split display           | ✅             | ✅             | ✅             |
+| vterm backend                  | ✅             | ✅             | ✅             |
+| eat backend                    | ✅             | ❌             | ✅             |
+| shell / eshell backend         | ✅             | ❌             | ✅             |
+| Named instances                | ✅             | ✅             | ✅             |
+| completing-read picker         | ✅             | ❌             | ✅             |
+| Project scope                  | ✅             | ✅             | ❌             |
+| Frame scope                    | ✅             | ✅             | ❌             |
+| Auto-cd to source buffer       | ✅             | ✅             | ❌             |
+| TRAMP-aware auto-cd            | ✅             | ✅             | ❌             |
+
+** 🤝 Contributing
+
+Bug reports, feature requests, and pull requests are welcome.
+
+Before submitting a patch, please ensure:
+
+1. The file byte-compiles cleanly: ~M-x emacs-lisp-byte-compile~
+2. ~checkdoc~ passes: ~M-x checkdoc~
+3. All public functions have docstrings that uppercase argument names (e.g.,
+   ~NAME~, ~BACKEND~)
+4. New ~defcustom~ entries have a complete standalone first-sentence docstring
+5. Messages begin with a capital letter: ~"Popterm: ..."~
+
+** 📜 License
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 3, or (at your option) any later version.
+
+** 🙏 Acknowledgments
+
+~popterm~ stands on the shoulders of:
+
+- [[https://github.com/seagle0128/.emacs.d][seagle0128/.emacs.d]] — posframe shell-pop pattern and child-frame geometry
+- [[https://github.com/justinlime/toggle-term.el][toggle-term.el]] — multi-backend architecture and named instance model
+- [[https://github.com/jixiuf/vterm-toggle][vterm-toggle]] — auto-cd, TRAMP path handling, and scope-locking design
+- [[https://github.com/tumashu/posframe][posframe]] — the child-frame rendering library that makes this possible
