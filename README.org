@@ -306,6 +306,31 @@ have a ~localname~ component. File a bug with the output of the above.
 buffers must be re-created each session. Use ~popterm-find~ (~M-x popterm-find~)
 to survey all active instances at any time.
 
+*** Conflict when opening multiple posframe
+
+see - https://github.com/tumashu/posframe/issues/155
+
+please use this work-around.
+
+#+BEGIN_SRC emacs-lisp
+(with-eval-after-load 'popterm
+  (defun my/popterm--after-focus-change ()
+    "Keep popterm visible during minibuffer use and while parent frame is selected."
+    (let ((parent (and (frame-live-p popterm--frame)
+                       (frame-parent popterm--frame))))
+      (when (and (not popterm--inhibit-hidehandler)
+                 (popterm--posframe-visible-p)
+                 (not (active-minibuffer-window))
+                 (not (eq (selected-frame) parent))
+                 (not (popterm--posframe-focused-p)))
+        (popterm--posframe-hide))))
+
+  (advice-add 'popterm--after-focus-change :override
+              #'my/popterm--after-focus-change))
+#+END_SRC
+
+
+
 ** 📊 Comparison with Similar Packages
 
 | Feature                        | ~popterm~      | ~vterm-toggle~ | ~toggle-term~  |
