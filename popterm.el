@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: ckaiatwork
-;; Version: 0.9.0
+;; Version: 0.9.1
 ;; Package-Requires: ((emacs "28.1") (posframe "1.4.0"))
 ;; Keywords: terminals, convenience, tools
 ;; URL: https://github.com/user/popterm.el
@@ -372,13 +372,32 @@ correct idioms for their respective backends."
 
 ;;; ── Posframe display ─────────────────────────────────────────────────────────
 
-(defun popterm--posframe-hidehandler (_)
-  "Hidehandler: return non-nil to signal posframe to hide when focus has left.
-Returns nil unconditionally while `popterm--inhibit-hidehandler' is set,
-preventing the async Wayland/pgtk focus event from re-hiding the frame
-during the `popterm-posframe-focus-delay' window after a show."
-  (and (not popterm--inhibit-hidehandler)
-       (not (eq (selected-frame) popterm--frame))))
+(defun popterm--posframe-focused-p ()
+  "Return non-nil when the popterm posframe currently hold compositor focus.
+On pgtk (Wayland), `frame-focus-state' is used to query the actual
+compositor focus state rather than relying on `selected-frame', which
+can lag behind the real state due to async Wayland event dispatch."
+  (and (frame-live-p popterm--frame)
+       (if (fboundp 'frame-focus-state)
+           (frame-focus-state popterm--frame)
+         (eq (selected-frame) popterm--frame))))
+
+(defun popterm--after-focus-change ()
+  "Hide the posframe when compositor focus leave the child frame.
+Attached to `after-focus-change-function' (Emacs 27+), which fires on
+real compositor-level focus events — unlike posframe's idle-timer
+hidehandler, which polls `selected-frame' and is unreliable on
+Wayland/pgtk where focus transfer is asynchronous.
+The `popterm--inhibit-hidehandler' guard prevents spurious hides during
+the `popterm-posframe-focus-delay' window immediately after a show."
+  (when (and (not popterm--inhibit-hidehandler)
+             (popterm--posframe-visible-p)
+             (not (popterm--posframe-focused-p)))
+    (popterm--posframe-hide)))
+
+;; Register once at load time.  The function is a no-op when no posframe
+;; is visible, so it is safe to leave permanently attached.
+(add-function :after after-focus-change-function #'popterm--after-focus-change)
 
 (defun popterm--posframe-show (buffer)
   "Show BUFFER in a centered posframe child frame."
@@ -392,7 +411,6 @@ during the `popterm-posframe-focus-delay' window after a show."
            buffer
            :poshandler            (or popterm-posframe-poshandler
                                       #'posframe-poshandler-frame-center)
-           :hidehandler           #'popterm--posframe-hidehandler
            :left-fringe           8
            :right-fringe          8
            :width                 w
