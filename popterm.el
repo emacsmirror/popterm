@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: Chetan Koneru <kchetan.hadoop@gmail.com>
-;; Version: 0.9.1
+;; Version: 1.0.0
 ;; Package-Requires: ((emacs "28.1") (posframe "1.4.0"))
 ;; Keywords: terminals, convenience, tools
 ;; URL: https://github.com/CsBigDataHub/popterm.el
@@ -43,8 +43,8 @@
 ;;
 ;; Quick start:
 ;;   (use-package popterm
-;;     :bind ((\"C-`\"  . popterm-toggle)
-;;            (\"C-~\"  . popterm-toggle-cd)
+;;     :bind (("C-`"  . popterm-toggle)
+;;            ("C-~"  . popterm-toggle-cd)
 ;;            ([f9]   . popterm-window-toggle))
 ;;     :config
 ;;     (setq popterm-backend        'vterm
@@ -192,14 +192,14 @@ timer from resetting the inhibit flag mid-flight on the next show cycle.")
   "Minor mode active in popterm terminal buffers.
 Key bindings (see also `popterm-term-map'):
 
-\[popterm-next]   — cycle forward  through popterm buffers
-\[popterm-prev]   — cycle backward through popterm buffers
-\[popterm-return] — return to source buffer
+\\[popterm-next]   — cycle forward  through popterm buffers
+\\[popterm-prev]   — cycle backward through popterm buffers
+\\[popterm-return] — return to source buffer
 
 For vterm, these keys are registered in `vterm-keymap-exceptions' so
 vterm's character-mode input handler passes them to Emacs.
 
-\{popterm-term-map}"
+\\{popterm-term-map}"
   :init-value nil
   :keymap popterm-term-map)
 
@@ -259,26 +259,40 @@ popping a window or disturbing the current layout."
                      (get-buffer vterm-buffer-name))
                  (user-error "popterm: Vterm not installed")))
               ('eat
-               ;; Mirror the vterm pattern: bind eat-buffer-name so eat
-               ;; creates the buffer under our name rather than *eat*.
-               ;; Do NOT pre-create the buffer — eat must own its buffer
-               ;; from the start so the PTY process is attached correctly.
+               ;; Bind eat-buffer-name (a defcustom/special var) so eat's
+               ;; (get-buffer-create eat-buffer-name) call names the buffer
+               ;; correctly.  If a version of eat ignores the variable and
+               ;; creates *eat* instead, the rename fallback recovers.
                (if (fboundp 'eat)
-                   (let ((eat-buffer-name (popterm--buffer-name name backend)))
+                   (let* ((bname (popterm--buffer-name name backend))
+                          (eat-buffer-name bname))
                      (eat)
-                     (get-buffer eat-buffer-name))
+                     (or (get-buffer bname)
+                         ;; Rename safety net: eat created *eat* — take it.
+                         (when-let ((eb (get-buffer "*eat*")))
+                           (with-current-buffer eb
+                             (rename-buffer bname t))
+                           (get-buffer bname))))
                  (user-error "popterm: Eat not installed")))
               ('shell
                (shell (popterm--buffer-name name backend)))
               ('eshell
-               ;; eshell t creates a new buffer; fetch by name for the same
-               ;; reason as eat — (eshell) return value is not guaranteed.
+               ;; Do NOT pass t to eshell: (eshell t) calls
+               ;; (generate-new-buffer eshell-buffer-name), producing
+               ;; *popterm-eshell*<2>, <3>... on repeated invocations.
+               ;; (eshell) with no arg calls (get-buffer-create ...) which
+               ;; returns the named buffer or creates it exactly once.
+               ;; popterm--create is only called when no buffer exists, so
+               ;; reuse semantics here are correct.
                (if (fboundp 'eshell)
                    (let ((eshell-buffer-name
                           (popterm--buffer-name name backend)))
-                     (eshell t)
+                     (eshell)
                      (get-buffer eshell-buffer-name))
                  (user-error "popterm: Eshell not available")))))))
+    (unless (buffer-live-p buf)
+      (error "Popterm: %s failed to create a buffer named %S — check that the backend is installed and functional"
+             backend (popterm--buffer-name name backend)))
     (with-current-buffer buf
       (popterm-mode 1))
     buf))
@@ -287,7 +301,7 @@ popping a window or disturbing the current layout."
 
 (defun popterm--buffer-directory (&optional buffer)
   "Return BUFFER's directory as an absolute path string, or nil.
-Prefers `buffer-file-name' and falls back to `default-directory'.  This
+Prefers command `buffer-file-name' and falls back to `default-directory'.  This
 helper is defensive for special buffers where `default-directory' may be
 nil, such as `*Messages*'."
   (with-current-buffer (or buffer (current-buffer))
@@ -360,12 +374,14 @@ Strips the TRAMP remote prefix so the command is valid on the remote host.
 Returns nil when SOURCE-BUF has no usable directory.  Side-effect-free;
 part of the public API for custom integrations.
 
-This function uses `file-remote-p' when available and does not require TRAMP
-at load time."
-  (when-let* ((dir    (popterm--buffer-directory source-buf))
-              (remote (file-remote-p dir))
-              (local  (if remote (file-remote-p dir 'localname) dir)))
-    (format "cd %s" (shell-quote-argument (directory-file-name local)))))
+Uses `file-remote-p' for TRAMP-awareness without requiring TRAMP at load time.
+For local paths (macOS, Linux, no TRAMP), `file-remote-p' returns nil and the
+directory is used as-is."
+  (when-let* ((dir (popterm--buffer-directory source-buf)))
+    (let* ((remote (file-remote-p dir))
+           (local  (if remote (file-remote-p dir 'localname) dir)))
+      (when local
+        (format "cd %s" (shell-quote-argument (directory-file-name local)))))))
 
 (defun popterm--send-cd (term-buf source-buf)
   "Send a cd command into TERM-BUF based on SOURCE-BUF's directory.
