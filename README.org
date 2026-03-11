@@ -37,16 +37,17 @@ layouts, asynchronous compositor events, and background processes.
 *** straight.el / elpaca
 
 #+BEGIN_SRC emacs-lisp
-(use-package popterm
-  :straight (popterm :type git :host github :repo "CsBigDataHub/popterm.el")
-  :bind (("C-`"   . popterm-toggle)
-         ("C-~"   . popterm-toggle-cd)
-         ([f9]    . popterm-window-toggle))
-  :config
-  (setq popterm-backend        'vterm     ; or 'eat, 'shell, 'eshell
-        popterm-display-method 'posframe  ; or 'window, 'fullscreen
-        popterm-scope          'project   ; or 'frame, 'dedicated, nil
-        popterm-auto-cd        t))
+  (use-package popterm
+    :straight (popterm :type git :host github :repo "CsBigDataHub/popterm.el")
+    :bind (("C-`"   . popterm-toggle)
+           ("C-~"   . popterm-toggle-cd)
+           ([f9]    . popterm-window-toggle))
+    :config
+    (setq popterm-backend        'vterm     ; or 'eat, 'shell, 'eshell
+          popterm-display-method 'posframe  ; or 'window, 'fullscreen
+          popterm-scope          'project   ; or 'frame, 'dedicated, nil
+          popterm-auto-cd        t)
+    (popterm-global-mode 1))
 #+END_SRC
 
 *** Manual
@@ -313,20 +314,20 @@ see - https://github.com/tumashu/posframe/issues/155
 please use this work-around.
 
 #+BEGIN_SRC emacs-lisp
-(with-eval-after-load 'popterm
-  (defun my/popterm--after-focus-change ()
-    "Keep popterm visible during minibuffer use and while parent frame is selected."
-    (let ((parent (and (frame-live-p popterm--frame)
-                       (frame-parent popterm--frame))))
-      (when (and (not popterm--inhibit-hidehandler)
-                 (popterm--posframe-visible-p)
-                 (not (active-minibuffer-window))
-                 (not (eq (selected-frame) parent))
-                 (not (popterm--posframe-focused-p)))
-        (popterm--posframe-hide))))
+  (with-eval-after-load 'popterm
+    (defun my/popterm--after-focus-change ()
+      "Keep popterm visible during minibuffer use and while parent frame is selected."
+      (let ((parent (and (frame-live-p popterm--frame)
+                         (frame-parent popterm--frame))))
+        (when (and (not popterm--inhibit-hidehandler)
+                   (popterm--posframe-visible-p)
+                   (not (active-minibuffer-window))
+                   (not (eq (selected-frame) parent))
+                   (not (popterm--posframe-focused-p)))
+          (popterm--posframe-hide))))
 
-  (advice-add 'popterm--after-focus-change :override
-              #'my/popterm--after-focus-change))
+    (advice-add 'popterm--after-focus-change :override
+                #'my/popterm--after-focus-change))
 #+END_SRC
 
 
