@@ -1,8 +1,5 @@
 #+TITLE: popterm.el
-#+AUTHOR: ckaiatwork
 #+DESCRIPTION: A smart, posframe-based terminal toggler for Emacs.
-
-* popterm.el
 
 *A smart, posframe-based terminal toggler for Emacs.*
 
