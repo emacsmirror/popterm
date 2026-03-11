@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: ckaiatwork
-;; Version: 0.7.2
+;; Version: 0.9.0
 ;; Package-Requires: ((emacs "28.1") (posframe "1.4.0"))
 ;; Keywords: terminals, convenience, tools
 ;; URL: https://github.com/user/popterm.el
@@ -126,6 +126,17 @@ When nil, `popterm-toggle-cd' is a no-op if no terminal is found in scope."
   :type 'function
   :group 'popterm)
 
+(defcustom popterm-posframe-focus-delay 0.35
+  "Seconds to inhibit the hidehandler after showing the posframe.
+On Wayland/pgtk, focus-change events are asynchronous and can arrive
+before `select-frame-set-input-focus' completes.  Without this guard,
+pressing the toggle key twice in quick succession hides the posframe
+immediately after showing it because the hidehandler fires during the
+focus-transfer window.  Increase this value if the race still occurs
+on a slow compositor."
+  :type 'float
+  :group 'popterm)
+
 ;; ── Window split geometry ─────────────────────────────────────────────────────
 
 (defcustom popterm-window-height-ratio 0.30
@@ -144,6 +155,18 @@ When nil, `popterm-toggle-cd' is a no-op if no terminal is found in scope."
 (defvar popterm--frame-buffer  nil "Buffer displayed in the active posframe.")
 (defvar popterm--window        nil "Active window-split window.")
 (defvar popterm--source-buffer nil "Buffer active before the last toggle.")
+(defvar popterm--inhibit-hidehandler nil
+  "Non-nil while the posframe is being shown, inhibiting the hidehandler.
+Set to t by `popterm--posframe-show' and cleared after
+`popterm-posframe-focus-delay' seconds via a one-shot timer.  This
+prevents the Wayland/pgtk async focus event from immediately re-hiding
+the posframe before `select-frame-set-input-focus' has completed.")
+
+(defvar popterm--focus-timer nil
+  "One-shot timer that clears `popterm--inhibit-hidehandler'.
+Stored so that rapid successive toggles within `popterm-posframe-focus-delay'
+cancel the previous timer before spawning a new one, preventing a ghost
+timer from resetting the inhibit flag mid-flight on the next show cycle.")
 
 ;;; ── Minor mode + vterm keymap passthrough ─────────────────────────────────────
 
@@ -223,17 +246,24 @@ popping a window or disturbing the current layout."
                ;; creates the buffer under our name rather than *eat*.
                ;; Do NOT pre-create the buffer — eat must own its buffer
                ;; from the start so the PTY process is attached correctly.
+               ;; Explicitly fetch the buffer after calling (eat) rather than
+               ;; relying on its return value: interactive emulator entry
+               ;; points may return a window object or nil, not a buffer.
                (if (fboundp 'eat)
                    (let ((eat-buffer-name (popterm--buffer-name name backend)))
-                     (eat))
+                     (eat)
+                     (get-buffer eat-buffer-name))
                  (user-error "popterm: Eat not installed")))
               ('shell
                (shell (popterm--buffer-name name backend)))
               ('eshell
+               ;; eshell t creates a new buffer; fetch by name for the same
+               ;; reason as eat — (eshell) return value is not guaranteed.
                (if (fboundp 'eshell)
                    (let ((eshell-buffer-name
                           (popterm--buffer-name name backend)))
-                     (eshell t))
+                     (eshell t)
+                     (get-buffer eshell-buffer-name))
                  (user-error "popterm: Eshell not available")))))))
     (with-current-buffer buf
       (popterm-mode 1))
@@ -343,8 +373,12 @@ correct idioms for their respective backends."
 ;;; ── Posframe display ─────────────────────────────────────────────────────────
 
 (defun popterm--posframe-hidehandler (_)
-  "Hidehandler: return non-nil to signal posframe to hide when focus has left."
-  (not (eq (selected-frame) popterm--frame)))
+  "Hidehandler: return non-nil to signal posframe to hide when focus has left.
+Returns nil unconditionally while `popterm--inhibit-hidehandler' is set,
+preventing the async Wayland/pgtk focus event from re-hiding the frame
+during the `popterm-posframe-focus-delay' window after a show."
+  (and (not popterm--inhibit-hidehandler)
+       (not (eq (selected-frame) popterm--frame))))
 
 (defun popterm--posframe-show (buffer)
   "Show BUFFER in a centered posframe child frame."
@@ -372,6 +406,18 @@ correct idioms for their respective backends."
            :override-parameters  '((cursor-type . t))
            :respect-mode-line     t
            :accept-focus          t))
+    ;; Inhibit the hidehandler during the focus-transfer window.
+    ;; Cancel any in-flight timer first: rapid key-repeat within the delay
+    ;; window would otherwise spawn multiple timers, and the earliest would
+    ;; clear the inhibit flag mid-flight on the next show cycle.
+    (setq popterm--inhibit-hidehandler t)
+    (when (timerp popterm--focus-timer)
+      (cancel-timer popterm--focus-timer))
+    (setq popterm--focus-timer
+          (run-with-timer popterm-posframe-focus-delay nil
+                          (lambda ()
+                            (setq popterm--inhibit-hidehandler nil)
+                            (setq popterm--focus-timer nil))))
     (select-frame-set-input-focus popterm--frame)
     (with-current-buffer buffer
       (setq-local cursor-type 'box)
