@@ -221,6 +221,19 @@ instead of `add-to-list' for idempotent per-buffer safety."
 
 ;;; ── Backend helpers ───────────────────────────────────────────────────────────
 
+;; Declare external variables as dynamic to prevent the lexical-binding trap.
+;; With lexical-binding: t, `let' only creates a dynamic binding when the
+;; variable is already declared special (defvar/defcustom).  Because popterm
+;; lazily detects backends without hard-requiring them, the compiler has not
+;; seen these defcustoms.  A bare (defvar foo) with no value is the canonical
+;; Emacs idiom for "treat this as special in this file" without loading the
+;; package or setting a default — used widely in cl-lib and ELPA packages for
+;; exactly this cross-package dynamic-variable reference pattern.
+(defvar eat-buffer-name)
+(defvar eshell-buffer-name)
+;; vterm-buffer-name is handled via a direct argument (see vterm backend below)
+;; so no defvar is needed for it.
+
 (defsubst popterm--mode (backend)
   "Return the major-mode symbol for BACKEND."
   (pcase backend
@@ -249,23 +262,23 @@ so vterm/eat initialize their PTY with correct frame dimensions without
 popping a window or disturbing the current layout."
   (let* ((display-buffer-alist
           '((".*" (display-buffer-no-window) (allow-no-window . t))))
+         (bname (popterm--buffer-name name backend))
          (buf
           (save-current-buffer
             (pcase backend
               ('vterm
+               ;; vterm accepts a buffer-name string as its first argument,
+               ;; bypassing vterm-buffer-name entirely — no defvar needed.
                (if (fboundp 'vterm)
-                   (let ((vterm-buffer-name (popterm--buffer-name name backend)))
-                     (vterm)
-                     (get-buffer vterm-buffer-name))
+                   (progn
+                     (vterm bname)
+                     (get-buffer bname))
                  (user-error "popterm: Vterm not installed")))
               ('eat
-               ;; Bind eat-buffer-name (a defcustom/special var) so eat's
-               ;; (get-buffer-create eat-buffer-name) call names the buffer
-               ;; correctly.  If a version of eat ignores the variable and
-               ;; creates *eat* instead, the rename fallback recovers.
+               ;; eat-buffer-name is declared special above via (defvar),
+               ;; so this let creates a true dynamic binding.
                (if (fboundp 'eat)
-                   (let* ((bname (popterm--buffer-name name backend))
-                          (eat-buffer-name bname))
+                   (let ((eat-buffer-name bname))
                      (eat)
                      (or (get-buffer bname)
                          ;; Rename safety net: eat created *eat* — take it.
@@ -275,24 +288,20 @@ popping a window or disturbing the current layout."
                            (get-buffer bname))))
                  (user-error "popterm: Eat not installed")))
               ('shell
-               (shell (popterm--buffer-name name backend)))
+               (shell bname))
               ('eshell
-               ;; Do NOT pass t to eshell: (eshell t) calls
-               ;; (generate-new-buffer eshell-buffer-name), producing
-               ;; *popterm-eshell*<2>, <3>... on repeated invocations.
-               ;; (eshell) with no arg calls (get-buffer-create ...) which
-               ;; returns the named buffer or creates it exactly once.
-               ;; popterm--create is only called when no buffer exists, so
-               ;; reuse semantics here are correct.
+               ;; eshell-buffer-name declared special above via (defvar).
+               ;; (eshell) without t uses get-buffer-create — idempotent
+               ;; and correct since popterm--create only runs when no buffer
+               ;; exists yet (popterm--get-or-create guards before this).
                (if (fboundp 'eshell)
-                   (let ((eshell-buffer-name
-                          (popterm--buffer-name name backend)))
+                   (let ((eshell-buffer-name bname))
                      (eshell)
-                     (get-buffer eshell-buffer-name))
+                     (get-buffer bname))
                  (user-error "popterm: Eshell not available")))))))
     (unless (buffer-live-p buf)
       (error "Popterm: %s failed to create a buffer named %S — check that the backend is installed and functional"
-             backend (popterm--buffer-name name backend)))
+             backend bname))
     (with-current-buffer buf
       (popterm-mode 1))
     buf))
