@@ -201,12 +201,11 @@ posframe occasionally re-hides itself immediately after opening:
 
 ~vterm~ (and ~eat~) intercept keystrokes at the process-filter level, before
 Emacs's minor-mode keymap lookup ever runs. ~popterm~ solves this by registering
-its navigation keys in ~vterm-keymap-exceptions~ at load time:
+its navigation keys from ~vterm-mode-hook~, so each vterm buffer gets the
+exceptions added buffer-locally when ~popterm-global-mode~ is enabled:
 
 #+BEGIN_SRC emacs-lisp
-(with-eval-after-load 'vterm
-  (dolist (key popterm--vterm-passthrough-keys)
-    (add-to-list 'vterm-keymap-exceptions key)))
+(add-hook 'vterm-mode-hook #'popterm--vterm-setup)
 #+END_SRC
 
 This instructs libvterm to hand the key back to Emacs rather than forwarding it
@@ -235,6 +234,12 @@ The inhibit timer (~popterm-posframe-focus-delay~ seconds, stored in
 ~popterm--focus-timer~) prevents the Wayland/pgtk async focus race: on these
 compositors, focus events can arrive before ~select-frame-set-input-focus~
 completes, causing the hidehandler to fire prematurely on rapid toggle.
+
+When the hidehandler does decide to hide, ~popterm~ also clears its own
+posframe session state (focus guard, display-buffer guard, theme refresh watch,
+and timers) before the child frame is dismissed. This prevents stale guards
+from lingering after an idle-timer hide and avoids accidentally re-showing the
+terminal on a later theme change.
 
 *** How PTY Initialization Artifacts Are Prevented
 
@@ -280,13 +285,11 @@ You are likely on Wayland/pgtk. Increase the focus delay guard:
 *** ~C-q~ / ~C-<next>~ not working inside vterm
 
 Ensure ~vterm-keymap-exceptions~ contains the keys. ~popterm~ registers them
-automatically via ~with-eval-after-load 'vterm~, so ~vterm~ must be loaded
-*after* ~popterm~. If you load ~vterm~ eagerly before ~popterm~, add manually:
+automatically from ~vterm-mode-hook~ when ~popterm-global-mode~ is enabled.
+If you do not use ~popterm-global-mode~, add the hook manually:
 
 #+BEGIN_SRC emacs-lisp
-(with-eval-after-load 'vterm
-  (dolist (key '("C-<next>" "C-<prior>" "C-q"))
-    (add-to-list 'vterm-keymap-exceptions key)))
+(add-hook 'vterm-mode-hook #'popterm--vterm-setup)
 #+END_SRC
 
 *** Terminal opens as a blank buffer (eat backend)
@@ -319,14 +322,16 @@ to survey all active instances at any time.
 see - https://github.com/tumashu/posframe/issues/155
 
 This is now handled natively by ~popterm--posframe-hidehandler~.  The hidehandler
-checks three conditions that together prevent spurious hides when a completion
-child frame (vertico-posframe, corfu-posframe, etc.) opens while popterm is
-visible:
+combines the focus-delay timer, parent/child-frame checks, and session-state
+cleanup to prevent spurious hides when a completion child frame
+(vertico-posframe, corfu-posframe, etc.) opens while popterm is visible:
 
 - ~(active-minibuffer-window)~ — guards standard minibuffer completion.
 - ~(frame-parameter (selected-frame) 'parent-frame)~ — guards all child-frame UIs.
 - ~(memq (selected-frame) (list popterm--frame parent))~ — keeps the posframe
   visible while the workspace frame or the popterm frame itself is focused.
+- Internal cleanup on daemon hide — removes stale guards and timers so the
+  posframe does not resurrect unexpectedly on later theme changes.
 
 No user-side workaround is needed.  If you had previously installed an advice
 override for ~popterm--after-focus-change~, you can safely remove it — that
@@ -350,6 +355,105 @@ function no longer exists.
 | Auto-cd to source buffer       | ✅             | ✅             | ❌             |
 | TRAMP-aware auto-cd            | ✅             | ✅             | ❌             |
 
+** 🧪 Testing
+
+~popterm~ includes a comprehensive test suite using ERT (Emacs Lisp Regression Testing).
+
+*** Running Tests Interactively
+
+Load the test file and run all tests:
+
+#+BEGIN_SRC emacs-lisp
+(load-file "popterm-tests.el")
+(ert-run-tests-interactively "^popterm-")
+#+END_SRC
+
+Or use the convenience function:
+
+#+BEGIN_SRC emacs-lisp
+M-x popterm-run-all-tests
+#+END_SRC
+
+*** Running Tests from Command Line
+
+For CI/CD integration or batch testing:
+
+#+BEGIN_SRC bash
+# Run all tests
+emacs -batch -l ert -l popterm.el -l popterm-tests.el -f ert-run-tests-batch-and-exit
+
+# Run specific test
+emacs -batch -l ert -l popterm.el -l popterm-tests.el \
+  --eval "(ert-run-tests-batch-and-exit 'popterm-test-buffer-name)"
+#+END_SRC
+
+*** Running Specific Test Categories
+
+#+BEGIN_SRC emacs-lisp
+;; Run only performance tests
+(ert-run-tests-interactively '(tag :performance))
+
+;; Run a specific test
+M-x ert RET popterm-test-buffer-name RET
+#+END_SRC
+
+*** Test Coverage
+
+The test suite covers:
+
+- *Basic API:* Buffer name generation, mode mapping
+- *Directory & Path Handling:* Local/remote paths, TRAMP awareness, cd command generation
+- *Scope & Filtering:* Project scope, frame scope, multi-frame visibility, buffer list filtering
+- *Guard Installation:* Idempotent installation/removal of display-buffer, focus, and theme guards
+- *Timer Management:* Timer cleanup, leak prevention
+- *Closure Capture:* Frame capture in async callbacks
+- *Session State:* Active display-method tracking, forced posframe/window sessions, daemon-hide cleanup
+- *Code Quality:* Frame capture race condition fix, timer cleanup in hide, vterm-setup docstring
+- *Integration:* Display-buffer-guard predicate, posframe visibility checks, theme-refresh behavior
+- *Performance:* Buffer list filtering with 50+ buffers
+
+*** Expected Output
+
+All tests should pass. The exact count will change as coverage grows. A current
+run looks like:
+
+#+BEGIN_EXAMPLE
+Selector: "^popterm-"
+Passed:  26
+Failed:  0
+Skipped: 0
+Total:   26/26
+
+26 passed (4.831 sec)
+#+END_EXAMPLE
+
+*** CI Integration Example
+
+For GitHub Actions:
+
+#+BEGIN_SRC yaml
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        emacs_version: ['28.1', '28.2', '29.1']
+    steps:
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs_version }}
+      - uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          emacs -batch -l package --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
+            --eval "(package-refresh-contents)" \
+            --eval "(package-install 'posframe)"
+      - name: Run tests
+        run: emacs -batch -l ert -l popterm.el -l popterm-tests.el -f ert-run-tests-batch-and-exit
+#+END_SRC
+
 ** 🤝 Contributing
 
 Bug reports, feature requests, and pull requests are welcome.
@@ -358,10 +462,12 @@ Before submitting a patch, please ensure:
 
 1. The file byte-compiles cleanly: ~M-x emacs-lisp-byte-compile~
 2. ~checkdoc~ passes: ~M-x checkdoc~
-3. All public functions have docstrings that uppercase argument names (e.g.,
+3. All tests pass: ~M-x popterm-run-all-tests~
+4. All public functions have docstrings that uppercase argument names (e.g.,
    ~NAME~, ~BACKEND~)
-4. New ~defcustom~ entries have a complete standalone first-sentence docstring
-5. Messages begin with a capital letter: ~"Popterm: ..."~
+5. New ~defcustom~ entries have a complete standalone first-sentence docstring
+6. Messages begin with a capital letter: ~"Popterm: ..."~
+7. New features include corresponding test coverage in ~popterm-tests.el~
 
 ** 📜 License
 

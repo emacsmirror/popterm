@@ -165,6 +165,8 @@ on a slow compositor."
 (defvar popterm--frame-buffer  nil "Buffer displayed in the active posframe.")
 (defvar popterm--window        nil "Active window-split window.")
 (defvar popterm--source-buffer nil "Buffer active before the last toggle.")
+(defvar popterm--active-display-method nil
+  "Display method currently used by the active Popterm session.")
 (defvar popterm--inhibit-hidehandler nil
   "Non-nil while the posframe is being shown, inhibiting the hidehandler.
 Set to t by `popterm--posframe-show' and cleared after
@@ -177,6 +179,12 @@ the posframe before `select-frame-set-input-focus' has completed.")
 Stored so that rapid successive toggles within `popterm-posframe-focus-delay'
 cancel the previous timer before spawning a new one, preventing a ghost
 timer from resetting the inhibit flag mid-flight on the next show cycle.")
+
+(defvar popterm--theme-refresh-timer nil
+  "Debounce timer for re-showing the active posframe after a theme change.")
+
+(defvar popterm--theme-watch-active nil
+  "Non-nil while Popterm is watching theme changes for an active posframe.")
 
 (defvar popterm--focus-guard-active nil
   "Non-nil while the posframe focus guard is installed.
@@ -234,8 +242,9 @@ vterm's character-mode input handler passes them to Emacs.
 (defun popterm--vterm-setup ()
   "Add `popterm--vterm-passthrough-keys' to `vterm-keymap-exceptions'.
 Called from `vterm-mode-hook' so that vterm is guaranteed to be loaded
-before `vterm-keymap-exceptions' is referenced.  `cl-pushnew' is used
-instead of `add-to-list' for idempotent per-buffer safety."
+before `vterm-keymap-exceptions' is referenced.  vterm makes
+`vterm-keymap-exceptions' buffer-local, so updates here affect only the
+current buffer.  `cl-pushnew' keeps the operation idempotent."
   (when (boundp 'vterm-keymap-exceptions)
     (dolist (key popterm--vterm-passthrough-keys)
       (cl-pushnew key vterm-keymap-exceptions :test #'equal))))
@@ -357,8 +366,10 @@ usable directory, or the project backend does not implement
 
 (defun popterm--not-in-other-frame (cur-frame buf)
   "Non-nil when BUF is not displayed in a frame other than CUR-FRAME."
-  (let ((win (get-buffer-window buf t)))
-    (or (null win) (eq (window-frame win) cur-frame))))
+  (let ((wins (get-buffer-window-list buf nil t)))
+    (not (cl-some (lambda (win)
+                    (not (eq (window-frame win) cur-frame)))
+                  wins))))
 
 (defun popterm--buffer-list (&optional backend)
   "Return all live popterm buffers for BACKEND, filtered by `popterm-scope'."
@@ -379,7 +390,8 @@ usable directory, or the project backend does not implement
               ('frame      (popterm--not-in-other-frame frame buf))
               ('project    (and root
                                 (when-let ((dir (popterm--buffer-directory buf)))
-                                  (string-prefix-p root dir)))))))
+                                  (ignore-errors
+                                    (file-in-directory-p dir root))))))))
      (buffer-list))))
 
 (defun popterm--get-or-create (&optional name backend)
@@ -462,6 +474,10 @@ window to display the active posframe buffer."
          (and name
               (string-prefix-p popterm--display-buffer-prefix name)))))
 
+(defun popterm--effective-display-method ()
+  "Return the currently active Popterm display method."
+  (or popterm--active-display-method popterm-display-method))
+
 (defun popterm--install-display-buffer-guard ()
   "Prevent popterm buffers from being shown in regular windows."
   (unless popterm--display-buffer-guard-active
@@ -496,15 +512,17 @@ The guard is *not* triggered when:
              (not (frame-parameter (selected-frame) 'parent-frame))
              ;; The selected frame is the parent, not the popterm frame.
              (not (eq (selected-frame) popterm--frame)))
-    ;; Use a zero-delay timer so we don't fight with the command that
-    ;; just transferred focus.  `run-at-time' with 0 runs after the
-    ;; current command cycle completes.
-    (run-at-time 0 nil
-                 (lambda ()
-                   (when (and popterm--focus-guard-active
-                              (popterm--posframe-visible-p)
-                              (not (active-minibuffer-window)))
-                     (select-frame-set-input-focus popterm--frame))))))
+    (let ((frame popterm--frame))
+      ;; Use a zero-delay timer so we don't fight with the command that
+      ;; just transferred focus.  `run-at-time' with 0 runs after the
+      ;; current command cycle completes.
+      (run-at-time 0 nil
+                   (lambda ()
+                     (when (and popterm--focus-guard-active
+                                (frame-live-p frame)
+                                (frame-visible-p frame)
+                                (not (active-minibuffer-window)))
+                       (select-frame-set-input-focus frame)))))))
 
 (defun popterm--install-focus-guard ()
   "Install the posframe focus guard on `after-focus-change-function'."
@@ -519,6 +537,67 @@ The guard is *not* triggered when:
     (setq popterm--focus-guard-active nil)
     (remove-function after-focus-change-function
                      #'popterm--posframe-focus-guard)))
+
+(defun popterm--cancel-focus-timer ()
+  "Cancel the pending posframe focus timer, if any."
+  (when (timerp popterm--focus-timer)
+    (cancel-timer popterm--focus-timer)
+    (setq popterm--focus-timer nil)))
+
+(defun popterm--cleanup-posframe-state ()
+  "Remove Popterm's posframe guards and clear its session state."
+  (popterm--remove-focus-guard)
+  (popterm--remove-display-buffer-guard)
+  (popterm--remove-theme-watch)
+  (popterm--cancel-focus-timer)
+  (setq popterm--inhibit-hidehandler nil
+        popterm--frame nil
+        popterm--frame-buffer nil)
+  (when (eq popterm--active-display-method 'posframe)
+    (setq popterm--active-display-method nil)))
+
+(defun popterm--refresh-posframe-after-theme-change ()
+  "Re-show the active Popterm posframe after theme changes settle.
+Theme switches can recreate or hide child frames; re-showing the active
+buffer restores the posframe with the new face colors without killing
+the terminal session."
+  (setq popterm--theme-refresh-timer nil)
+  (when (and (eq popterm--active-display-method 'posframe)
+             (buffer-live-p popterm--frame-buffer))
+    (popterm--posframe-show popterm--frame-buffer)))
+
+(defun popterm--queue-theme-refresh (&rest _args)
+  "Debounce Popterm posframe refresh during theme transitions."
+  (when (and popterm--theme-watch-active
+             (buffer-live-p popterm--frame-buffer))
+    (setq popterm--inhibit-hidehandler t)
+    (when (timerp popterm--theme-refresh-timer)
+      (cancel-timer popterm--theme-refresh-timer))
+    ;; Let theme face updates finish before re-showing the child frame.
+    (setq popterm--theme-refresh-timer
+          (run-with-timer 0.05 nil
+                          #'popterm--refresh-posframe-after-theme-change))))
+
+(defun popterm--install-theme-watch ()
+  "Watch theme changes while a Popterm posframe is active."
+  (unless popterm--theme-watch-active
+    (setq popterm--theme-watch-active t)
+    (when (boundp 'enable-theme-functions)
+      (add-hook 'enable-theme-functions #'popterm--queue-theme-refresh))
+    (advice-add 'load-theme :after #'popterm--queue-theme-refresh)
+    (advice-add 'disable-theme :after #'popterm--queue-theme-refresh)))
+
+(defun popterm--remove-theme-watch ()
+  "Stop watching theme changes for Popterm posframes."
+  (when popterm--theme-watch-active
+    (setq popterm--theme-watch-active nil)
+    (when (boundp 'enable-theme-functions)
+      (remove-hook 'enable-theme-functions #'popterm--queue-theme-refresh))
+    (advice-remove 'load-theme #'popterm--queue-theme-refresh)
+    (advice-remove 'disable-theme #'popterm--queue-theme-refresh))
+  (when (timerp popterm--theme-refresh-timer)
+    (cancel-timer popterm--theme-refresh-timer)
+    (setq popterm--theme-refresh-timer nil)))
 
 ;;; ── Posframe display ─────────────────────────────────────────────────────────
 
@@ -544,15 +623,20 @@ the `popterm-posframe-focus-delay' window immediately after showing,
 addressing the Wayland/pgtk async focus race.
 
 Fixes posframe#155 and seagle0128/.emacs.d#482."
-  (let ((parent (and popterm--frame
-                     (frame-live-p popterm--frame)
-                     (frame-parent popterm--frame))))
-    (and (not popterm--inhibit-hidehandler)
-         (frame-live-p popterm--frame)
-         (frame-visible-p popterm--frame)
-         (not (active-minibuffer-window))
-         (not (frame-parameter (selected-frame) 'parent-frame))
-         (not (memq (selected-frame) (list popterm--frame parent))))))
+  (let* ((frame popterm--frame)
+         (parent (and frame
+                      (frame-live-p frame)
+                      (frame-parent frame)))
+         (should-hide
+          (and (not popterm--inhibit-hidehandler)
+               (frame-live-p frame)
+               (frame-visible-p frame)
+               (not (active-minibuffer-window))
+               (not (frame-parameter (selected-frame) 'parent-frame))
+               (not (memq (selected-frame) (list frame parent))))))
+    (when should-hide
+      (popterm--cleanup-posframe-state))
+    should-hide))
 
 
 (defun popterm--posframe-show (buffer)
@@ -561,7 +645,8 @@ Fixes posframe#155 and seagle0128/.emacs.d#482."
   (let* ((w (max popterm-posframe-min-width
                  (round (* (frame-width)  popterm-posframe-width-ratio))))
          (h (round (* (frame-height) popterm-posframe-height-ratio))))
-    (setq popterm--frame-buffer buffer)
+    (setq popterm--active-display-method 'posframe
+          popterm--frame-buffer buffer)
     (setq popterm--frame
           (with-no-warnings
             (posframe-show
@@ -587,8 +672,7 @@ Fixes posframe#155 and seagle0128/.emacs.d#482."
     ;; window would otherwise spawn multiple timers, and the earliest would
     ;; clear the inhibit flag mid-flight on the next show cycle.
     (setq popterm--inhibit-hidehandler t)
-    (when (timerp popterm--focus-timer)
-      (cancel-timer popterm--focus-timer))
+    (popterm--cancel-focus-timer)
     (setq popterm--focus-timer
           (run-with-timer popterm-posframe-focus-delay nil
                           (lambda ()
@@ -604,26 +688,26 @@ Fixes posframe#155 and seagle0128/.emacs.d#482."
     ;; frame return to the posframe, and external `display-buffer' calls
     ;; cannot re-display popterm buffers in regular split windows.
     (popterm--install-display-buffer-guard)
-    (popterm--install-focus-guard)))
+    (popterm--install-focus-guard)
+    (popterm--install-theme-watch)))
 
 (defun popterm--posframe-hide ()
   "Hide the posframe via posframe's native API and restore parent focus.
 `posframe-hide' takes a buffer (not a frame) and manages the child-frame
 lifecycle correctly, avoiding orphaned frames."
-  ;; Remove guards FIRST so the parent-focus transfer below does not
-  ;; re-focus the soon-to-be-hidden posframe or block later normal
-  ;; display-buffer calls for popterm buffers.
-  (popterm--remove-focus-guard)
-  (popterm--remove-display-buffer-guard)
-  (let ((parent (and (frame-live-p popterm--frame)
-                     (frame-parent popterm--frame))))
-    (when (buffer-live-p popterm--frame-buffer)
-      (with-no-warnings
-        (posframe-hide popterm--frame-buffer)))
-    (when parent
-      (select-frame-set-input-focus parent)))
-  (setq popterm--frame        nil
-        popterm--frame-buffer nil))
+  (let ((frame popterm--frame)
+        (buffer popterm--frame-buffer))
+    ;; Remove guards FIRST so the parent-focus transfer below does not
+    ;; re-focus the soon-to-be-hidden posframe or block later normal
+    ;; display-buffer calls for popterm buffers.
+    (popterm--cleanup-posframe-state)
+    (let ((parent (and (frame-live-p frame)
+                       (frame-parent frame))))
+      (when (buffer-live-p buffer)
+        (with-no-warnings
+          (posframe-hide buffer)))
+      (when parent
+        (select-frame-set-input-focus parent)))))
 
 (defun popterm--posframe-visible-p ()
   "Non-nil when the posframe is live and visible."
@@ -639,6 +723,7 @@ lifecycle correctly, avoiding orphaned frames."
                            (frame-width))
                          popterm-window-height-ratio)))
          (win  (split-window (frame-root-window) (- size) popterm-window-side)))
+    (setq popterm--active-display-method 'window)
     (set-window-buffer win buffer)
     (setq popterm--window win)
     (select-window win)
@@ -648,7 +733,9 @@ lifecycle correctly, avoiding orphaned frames."
   "Delete the split window and dereference it."
   (when (window-live-p popterm--window)
     (delete-window popterm--window))
-  (setq popterm--window nil))
+  (setq popterm--window nil)
+  (when (eq popterm--active-display-method 'window)
+    (setq popterm--active-display-method nil)))
 
 (defun popterm--window-visible-p ()
   "Non-nil when the split window is live."
@@ -671,14 +758,19 @@ terminal, so `bury-buffer' correctly targets the terminal buffer."
   "Non-nil when any popterm display is currently active.
 For fullscreen, `memq' checks the entire buffer list so that navigating
 between named instances and then pressing the toggle key hides correctly."
-  (pcase popterm-display-method
-    ('posframe   (popterm--posframe-visible-p))
-    ('window     (popterm--window-visible-p))
-    ('fullscreen (memq (current-buffer) (popterm--buffer-list)))))
+  (let* ((method (popterm--effective-display-method))
+         (visible
+          (pcase method
+            ('posframe   (popterm--posframe-visible-p))
+            ('window     (popterm--window-visible-p))
+            ('fullscreen (memq (current-buffer) (popterm--buffer-list))))))
+    (unless visible
+      (setq popterm--active-display-method nil))
+    visible))
 
 (defun popterm--hide ()
   "Hide the active popterm display and clean up cross-mode strays."
-  (pcase popterm-display-method
+  (pcase (popterm--effective-display-method)
     ('posframe
      (popterm--posframe-hide)
      (popterm--window-hide))
@@ -686,10 +778,12 @@ between named instances and then pressing the toggle key hides correctly."
      (popterm--window-hide))
     ('fullscreen
      (popterm--window-hide)
-     (popterm--eject-to-source))))
+     (popterm--eject-to-source)
+     (setq popterm--active-display-method nil))))
 
 (defun popterm--show (buffer)
   "Show BUFFER using the configured display method."
+  (setq popterm--active-display-method popterm-display-method)
   (when-let ((w (get-buffer-window buffer)))
     (unless (eq popterm-display-method 'window)
       (delete-window w)))
@@ -831,14 +925,15 @@ user's code file.  Calling `bury-buffer' here would bury that file.
 When the source is dead in these modes the popup is already closed and
 the user is safely in their workspace; a message is sufficient."
   (interactive)
-  (popterm--hide)
-  (pcase popterm-display-method
-    ((or 'posframe 'window)
-     (if (buffer-live-p popterm--source-buffer)
-         (if-let ((w (get-buffer-window popterm--source-buffer)))
-             (select-window w)
-           (switch-to-buffer popterm--source-buffer))
-       (message "Popterm: Source buffer was killed")))))
+  (let ((method (popterm--effective-display-method)))
+    (popterm--hide)
+    (pcase method
+      ((or 'posframe 'window)
+       (if (buffer-live-p popterm--source-buffer)
+           (if-let ((w (get-buffer-window popterm--source-buffer)))
+               (select-window w)
+             (switch-to-buffer popterm--source-buffer))
+         (message "Popterm: Source buffer was killed"))))))
 
 ;;; ── Cleanup on buffer kill ────────────────────────────────────────────────────
 
