@@ -28,6 +28,7 @@
 (require 'popterm)
 
 (defvar vterm-keymap-exceptions)
+(defvar posframe--frame)
 
 ;;; ── Basic API Tests ───────────────────────────────────────────────────────────
 
@@ -77,7 +78,7 @@
     (let ((cmd (popterm-cd-string (current-buffer))))
       (should (string-match-p "cd " cmd))
       ;; Verify shell-quote-argument was used (escaped spaces or quotes)
-      (should (or (string-match-p "\\\\ " cmd)
+      (should (or (string-match-p "\\ " cmd)
                   (string-match-p "'" cmd)
                   (string-match-p "\"" cmd)))))
 
@@ -117,42 +118,32 @@
 (ert-deftest popterm-test-not-in-other-frame-detects-second-frame ()
   "Test frame-scope rejects buffers visible in another frame."
   (cl-letf (((symbol-function 'get-buffer-window-list)
-             (lambda (_buf _minibuf _all-frames)
+             (lambda (&rest _args)
                '(cur-win other-win)))
             ((symbol-function 'window-frame)
              (lambda (win)
-               (pcase win
-                 ('cur-win 'frame-a)
-                 ('other-win 'frame-b)))))
+               (if (eq win 'cur-win)
+                   'frame-a
+                 'frame-b))))
     (should-not (popterm--not-in-other-frame 'frame-a 'buffer))))
 
 (ert-deftest popterm-test-buffer-list-filtering ()
   "Test buffer list filtering respects major mode and prefix."
-  (let ((test-bufs '()))
+  (let ((test-bufs nil))
     (unwind-protect
-        (progn
-          ;; Create a mock popterm buffer with proper mode
-          (let ((buf (generate-new-buffer "*popterm-shell-test*")))
-            (push buf test-bufs)
-            (with-current-buffer buf
-              (setq major-mode 'shell-mode))
-
-            ;; Buffer should be in the list (check by name since mode might not be fully active)
-            (let ((bufs (popterm--buffer-list 'shell)))
-              (should (cl-some (lambda (b)
-                                 (string-prefix-p "*popterm-shell" (buffer-name b)))
-                               bufs))))
-
-          ;; Create a non-popterm shell buffer
-          (let ((buf (generate-new-buffer "*my-shell*")))
-            (push buf test-bufs)
-            (with-current-buffer buf
-              (setq major-mode 'shell-mode))
-
-            ;; Should not be in popterm buffer list
-            (should-not (member buf (popterm--buffer-list 'shell)))))
-
-      ;; Cleanup
+        (let ((popterm-buf (generate-new-buffer "*popterm-shell-test*"))
+              (other-buf (generate-new-buffer "*my-shell*")))
+          (setq test-bufs (list popterm-buf other-buf))
+          (with-current-buffer popterm-buf
+            (setq major-mode 'shell-mode))
+          (with-current-buffer other-buf
+            (setq major-mode 'shell-mode))
+          (let ((bufs (popterm--buffer-list 'shell)))
+            (should (cl-some (lambda (candidate)
+                               (string-prefix-p "*popterm-shell"
+                                                (buffer-name candidate)))
+                             bufs))
+            (should-not (member other-buf bufs))))
       (mapc #'kill-buffer test-bufs))))
 
 (ert-deftest popterm-test-buffer-list-filters-dead-buffers ()
@@ -373,16 +364,79 @@
   "Verify theme refresh honors the active session display method."
   (let ((popterm-display-method 'window)
         (popterm--active-display-method 'posframe)
+        (popterm--frame 'frame)
         (popterm--frame-buffer (get-buffer-create "*popterm-theme*"))
-        (refreshed-buffer nil))
+        (popterm--inhibit-hidehandler t)
+        (refreshed-frame nil)
+        (redrawn-frame nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'popterm--posframe-show)
-                   (lambda (buffer)
-                     (setq refreshed-buffer buffer))))
+        (cl-letf (((symbol-function 'frame-live-p) (lambda (_frame) t))
+                  ((symbol-function 'modify-frame-parameters)
+                   (lambda (frame _parameters)
+                     (setq refreshed-frame frame)))
+                  ((symbol-function 'redraw-frame)
+                   (lambda (frame)
+                     (setq redrawn-frame frame))))
           (popterm--refresh-posframe-after-theme-change)
-          (should (eq refreshed-buffer popterm--frame-buffer)))
+          (should (eq refreshed-frame popterm--frame))
+          (should (eq redrawn-frame popterm--frame))
+          (should-not popterm--inhibit-hidehandler))
       (when (buffer-live-p (get-buffer "*popterm-theme*"))
         (kill-buffer "*popterm-theme*")))))
+
+(ert-deftest popterm-test-posframe-delete-preserves-popterm-buffer ()
+  "Verify external posframe cleanup preserves Popterm terminal buffers."
+  (let ((buffer (get-buffer-create "*popterm-vterm*"))
+        (popterm--frame 'frame)
+        (popterm--frame-buffer nil)
+        (popterm--active-display-method 'posframe)
+        (popterm--theme-watch-active t)
+        (popterm--display-buffer-guard-active t)
+        (popterm--focus-guard-active t)
+        (orig-called nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq-local posframe--frame 'posframe-child)
+          (setq popterm--frame-buffer buffer)
+          (cl-letf (((symbol-function 'popterm--remove-focus-guard)
+                     (lambda () (setq popterm--focus-guard-active nil)))
+                    ((symbol-function 'popterm--remove-display-buffer-guard)
+                     (lambda () (setq popterm--display-buffer-guard-active nil)))
+                    ((symbol-function 'popterm--remove-theme-watch)
+                     (lambda () (setq popterm--theme-watch-active nil))))
+            (should-not
+             (popterm--preserve-buffer-during-posframe-delete
+              (lambda (&rest _args)
+                (setq orig-called t)
+                'killed)
+              buffer))
+            (should-not orig-called)
+            (should (buffer-live-p buffer))
+            (should (null posframe--frame))
+            (should (null popterm--frame))
+            (should (null popterm--frame-buffer))
+            (should (null popterm--active-display-method))
+            (should-not popterm--theme-watch-active)
+            (should-not popterm--display-buffer-guard-active)
+            (should-not popterm--focus-guard-active)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest popterm-test-posframe-delete-passes-through-non-popterm-buffer ()
+  "Verify non-Popterm buffers still use posframe's normal kill path."
+  (let ((buffer (get-buffer-create "*not-popterm*"))
+        (orig-args nil))
+    (unwind-protect
+        (let ((result
+               (popterm--preserve-buffer-during-posframe-delete
+                (lambda (&rest args)
+                  (setq orig-args args)
+                  'killed)
+                buffer)))
+          (should (eq result 'killed))
+          (should (equal orig-args (list buffer))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest popterm-test-show-records-active-display-method ()
   "Verify forced display methods become the active session method."

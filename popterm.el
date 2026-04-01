@@ -208,6 +208,35 @@ posframe session is active.")
 (defconst popterm--display-buffer-prefix "*popterm-"
   "Buffer-name prefix used by Popterm buffers.")
 
+(defun popterm--buffer-p (&optional buffer-or-name)
+  "Return non-nil when BUFFER-OR-NAME is a Popterm buffer."
+  (when-let* ((buffer (get-buffer buffer-or-name))
+              (name (buffer-name buffer)))
+    (string-prefix-p popterm--display-buffer-prefix name)))
+
+(defun popterm--preserve-buffer-during-posframe-delete (orig buffer-or-name)
+  "Keep Popterm terminal buffers alive during external posframe cleanup.
+
+Some configurations call `posframe-delete-all' after theme changes.
+That helper deletes child frames and then kills every posframe buffer,
+which is unsafe for Popterm because its posframe buffer is the live
+terminal session itself.  For Popterm buffers, clear stale posframe
+state but preserve the buffer and process.  Delegate all other buffers
+to ORIG with BUFFER-OR-NAME unchanged."
+  (let ((buffer (get-buffer buffer-or-name)))
+    (if (not (popterm--buffer-p buffer))
+        (funcall orig buffer-or-name)
+      (with-current-buffer buffer
+        (when (boundp 'posframe--frame)
+          (setq posframe--frame nil)))
+      (when (eq buffer popterm--frame-buffer)
+        (popterm--cleanup-posframe-state))
+      nil)))
+
+(with-eval-after-load 'posframe
+  (advice-add 'posframe--kill-buffer :around
+              #'popterm--preserve-buffer-during-posframe-delete))
+
 ;;; ── Minor mode + vterm keymap passthrough ─────────────────────────────────────
 
 (defvar popterm-term-map
@@ -557,14 +586,25 @@ The guard is *not* triggered when:
     (setq popterm--active-display-method nil)))
 
 (defun popterm--refresh-posframe-after-theme-change ()
-  "Re-show the active Popterm posframe after theme changes settle.
-Theme switches can recreate or hide child frames; re-showing the active
-buffer restores the posframe with the new face colors without killing
-the terminal session."
+  "Refresh the active Popterm posframe after theme changes settle.
+
+This updates the live child frame's colors in place instead of
+re-showing the terminal buffer.  Re-showing a process-backed buffer such
+as `vterm' during theme transitions can trigger unwanted kill-buffer
+prompts."
   (setq popterm--theme-refresh-timer nil)
-  (when (and (eq popterm--active-display-method 'posframe)
-             (buffer-live-p popterm--frame-buffer))
-    (popterm--posframe-show popterm--frame-buffer)))
+  (unwind-protect
+      (when (and (eq popterm--active-display-method 'posframe)
+                 (buffer-live-p popterm--frame-buffer)
+                 (frame-live-p popterm--frame))
+        (modify-frame-parameters
+         popterm--frame
+         `((internal-border-width . ,popterm-posframe-border-width)
+           (internal-border-color . ,(face-background 'region nil t))
+           (background-color . ,(face-background 'default nil t))
+           (foreground-color . ,(face-foreground 'default nil t))))
+        (redraw-frame popterm--frame))
+    (setq popterm--inhibit-hidehandler nil)))
 
 (defun popterm--queue-theme-refresh (&rest _args)
   "Debounce Popterm posframe refresh during theme transitions."
