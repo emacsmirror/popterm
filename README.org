@@ -6,17 +6,18 @@
 ~popterm~ merges the best paradigms of modern Emacs terminal management into a
 single package. It combines the aesthetic centered child-frames, the named-instance multiplexing of ~toggle-term.el~, and the TRAMP-aware scope-locking of ~vterm-toggle~.
 
-Whether you use ~vterm~, ~eat~, ~shell~, or ~eshell~, ~popterm~ provides a
-flawless, context-aware pop-up terminal experience that respects your window
-layouts, asynchronous compositor events, and background processes.
+Whether you use ~vterm~, ~ghostel~, ~eat~, ~shell~, or ~eshell~, ~popterm~
+provides a flawless, context-aware pop-up terminal experience that respects
+your window layouts, asynchronous compositor events, and background
+processes.
 
 ** ✨ Features
 
 - *Multiple Display Backends:* Choose between a centered ~posframe~ child-frame,
   a bottom ~window~ split, or a ~fullscreen~ takeover.
-- *Agnostic Terminal Support:* Seamlessly supports ~vterm~, ~eat~, ~shell~, and
-  ~eshell~ out of the box. No hard dependencies required—it auto-detects what
-  you have installed.
+- *Agnostic Terminal Support:* Seamlessly supports ~vterm~, ~ghostel~, ~eat~,
+  ~shell~, and ~eshell~ out of the box. No hard dependencies required—it
+  auto-detects what you have installed.
 - *Smart Auto-CD & TRAMP Awareness:* Automatically changes the terminal
   directory to match the buffer you toggled it from. It correctly parses TRAMP
   remote paths so SSH commands execute safely on the remote host without local
@@ -43,7 +44,7 @@ layouts, asynchronous compositor events, and background processes.
            ("C-~"   . popterm-toggle-cd)
            ([f9]    . popterm-window-toggle))
     :config
-    (setq popterm-backend        'vterm     ; or 'eat, 'shell, 'eshell
+    (setq popterm-backend        'vterm     ; or 'ghostel, 'eat, 'shell, 'eshell
           popterm-display-method 'posframe  ; or 'window, 'fullscreen
           popterm-scope          'project   ; or 'frame, 'dedicated, nil
           popterm-auto-cd        t)
@@ -61,35 +62,38 @@ Clone the repository and add the directory to your ~load-path~:
 
 *** Dependencies
 
-| Package   | Required? | Purpose                          |
-|-----------+-----------+----------------------------------|
-| ~posframe~  | Required  | Child-frame rendering            |
-| ~vterm~     | Optional  | vterm backend                    |
-| ~eat~       | Optional  | eat backend                      |
-| ~project~   | Built-in  | Project-scoped buffer resolution |
-| ~tramp~     | Built-in  | Remote path stripping for auto-cd |
+| Package    | Required? | Purpose                               |
+|------------+-----------+---------------------------------------|
+| ~posframe~ | Required  | Child-frame rendering                 |
+| ~vterm~    | Optional  | vterm backend                         |
+| ~ghostel~  | Optional  | Ghostel backend (requires its module) |
+| ~eat~      | Optional  | eat backend                           |
+| ~project~  | Built-in  | Project-scoped buffer resolution      |
+| ~tramp~    | Built-in  | Remote path stripping for auto-cd     |
 
 ** 🚀 Usage
 
 *** Global Commands
 
-| Command                  | Default Binding | Description                                              |
-|--------------------------+-----------------+----------------------------------------------------------|
-| ~popterm-toggle~           | ~C-`~           | Toggle the default terminal popup                        |
-| ~popterm-toggle-cd~        | ~C-~~           | Toggle and ~cd~ to the originating buffer's directory    |
-| ~popterm-toggle-named~     | ~C-c t n~       | Toggle a named instance, e.g. ~build~, ~server~, ~repl~ |
-| ~popterm-window-toggle~    | ~f9~            | Force a bottom window split regardless of display method |
-| ~popterm-posframe-toggle~  | —               | Force posframe regardless of display method              |
-| ~popterm-find~             | ~C-c t f~       | ~completing-read~ picker over all active popterm buffers |
-| ~popterm-vterm~            | —               | Toggle a vterm popup regardless of ~popterm-backend~     |
-| ~popterm-eat~              | —               | Toggle an eat popup regardless of ~popterm-backend~      |
-| ~popterm-shell~            | —               | Toggle a shell popup regardless of ~popterm-backend~     |
-| ~popterm-eshell~           | —               | Toggle an eshell popup regardless of ~popterm-backend~   |
+| Command                   | Default Binding | Description                                                |
+|---------------------------+-----------------+------------------------------------------------------------|
+| ~popterm-toggle~          | ~C-`~           | Toggle the default terminal popup                          |
+| ~popterm-toggle-cd~       | ~C-~~           | Toggle and ~cd~ to the originating buffer's directory      |
+| ~popterm-toggle-named~    | ~C-c t n~       | Toggle a named instance, e.g. ~build~, ~server~, ~repl~   |
+| ~popterm-window-toggle~   | ~f9~            | Force a bottom window split regardless of display method   |
+| ~popterm-posframe-toggle~ | —               | Force posframe regardless of display method                |
+| ~popterm-find~            | ~C-c t f~       | ~completing-read~ picker over all active popterm buffers   |
+| ~popterm-vterm~           | —               | Toggle a vterm popup regardless of ~popterm-backend~       |
+| ~popterm-ghostel~         | —               | Toggle a Ghostel popup regardless of ~popterm-backend~     |
+| ~popterm-eat~             | —               | Toggle an eat popup regardless of ~popterm-backend~        |
+| ~popterm-shell~           | —               | Toggle a shell popup regardless of ~popterm-backend~       |
+| ~popterm-eshell~          | —               | Toggle an eshell popup regardless of ~popterm-backend~     |
 
 *** Inside the Terminal (~popterm-mode~)
 
-When inside any ~popterm~ buffer, a minor mode activates navigation bindings
-that bypass both vterm and eat's character-mode input traps (see
+When inside any ~popterm~ buffer, a minor mode activates navigation bindings.
+For ~vterm~, Popterm also installs buffer-local passthrough exceptions so those
+keys reach Emacs instead of the terminal process (see
 [[*How the vterm Keymap Trap Is Solved][How the vterm Keymap Trap Is Solved]]):
 
 | Binding     | Command          | Description                                         |
@@ -137,7 +141,7 @@ via ~setq~ in your init file.
 *** Terminal Backend
 
 #+BEGIN_SRC emacs-lisp
-(setq popterm-backend 'vterm)   ; 'vterm | 'eat | 'shell | 'eshell
+(setq popterm-backend 'vterm)   ; 'vterm | 'ghostel | 'eat | 'shell | 'eshell
 #+END_SRC
 
 *** Posframe Geometry
@@ -241,13 +245,13 @@ and timers) before the child frame is dismissed. This prevents stale guards
 from lingering after an idle-timer hide and avoids accidentally re-showing the
 terminal on a later theme change.
 
-*** How PTY Initialization Artifacts Are Prevented
+*** How Backend Creation Avoids Display Artifacts
 
 ~vterm~ and ~eat~ call ~pop-to-buffer~ internally, which would normally disrupt
 the active window layout. ~popterm~ overrides ~display-buffer-alist~ dynamically
 during buffer creation to force ~display-buffer-no-window~, keeping the current
-layout intact while still allowing the PTY to query correct frame dimensions for
-its initial grid size:
+layout intact while still allowing PTY-backed terminals to query correct frame
+dimensions for their initial grid size:
 
 #+BEGIN_SRC emacs-lisp
 (let ((display-buffer-alist
@@ -259,6 +263,12 @@ its initial grid size:
 
 This is preferable to ~save-window-excursion~, which hides window dimensions and
 can produce a 0×0 initial PTY grid.
+
+~ghostel~ uses a different public entry point: it switches to the new terminal
+buffer and derives its default name internally. ~popterm~ wraps that command in
+~save-window-excursion~ to preserve the user's layout, then renames the created
+buffer into Popterm's canonical ~*popterm-ghostel*~ or
+~*popterm-ghostel[NAME]*~ naming scheme.
 
 *** How Dead Source Buffers Are Handled
 
@@ -298,6 +308,14 @@ This occurs if ~eat-buffer-name~ is not respected by your version of ~eat~.
 Check that your ~eat~ package is up to date (NonGNU ELPA or Codeberg ~master~
 branch). ~popterm~ binds ~eat-buffer-name~ before calling ~(eat)~ and fetches
 the buffer by name afterward — both steps require a current ~eat~.
+
+*** Ghostel backend does not start
+
+Ensure the ~ghostel~ package itself is installed and that its native module is
+available. Running ~M-x ghostel~ directly should succeed before debugging
+Popterm integration. If Ghostel prompts to download or compile its module, let
+that complete first; Popterm calls Ghostel's public entry point and does not
+bypass Ghostel's own module checks.
 
 *** Auto-cd does not work on remote (TRAMP) buffers
 
@@ -346,6 +364,7 @@ function no longer exists.
 | Posframe child-frame display   | ✅             | ❌             | ❌             |
 | Window split display           | ✅             | ✅             | ✅             |
 | vterm backend                  | ✅             | ✅             | ✅             |
+| Ghostel backend                | ✅             | ❌             | ❌             |
 | eat backend                    | ✅             | ❌             | ✅             |
 | shell / eshell backend         | ✅             | ❌             | ✅             |
 | Named instances                | ✅             | ✅             | ✅             |
@@ -401,14 +420,15 @@ M-x ert RET popterm-test-buffer-name RET
 
 The test suite covers:
 
-- *Basic API:* Buffer name generation, mode mapping
+- *Basic API:* Buffer name generation, mode mapping, backend wrapper dispatch
+- *Ghostel Integration:* Buffer creation/renaming and Ghostel auto-~cd~ behavior
 - *Directory & Path Handling:* Local/remote paths, TRAMP awareness, cd command generation
 - *Scope & Filtering:* Project scope, frame scope, multi-frame visibility, buffer list filtering
 - *Guard Installation:* Idempotent installation/removal of display-buffer, focus, and theme guards
 - *Timer Management:* Timer cleanup, leak prevention
 - *Closure Capture:* Frame capture in async callbacks
 - *Session State:* Active display-method tracking, forced posframe/window sessions, daemon-hide cleanup
-- *Code Quality:* Frame capture race condition fix, timer cleanup in hide, vterm-setup docstring
+- *Code Quality:* Byte-compilation, frame capture race condition fix, timer cleanup in hide, vterm-setup docstring
 - *Integration:* Display-buffer-guard predicate, posframe visibility checks, theme-refresh behavior
 - *Performance:* Buffer list filtering with 50+ buffers
 
@@ -419,12 +439,12 @@ run looks like:
 
 #+BEGIN_EXAMPLE
 Selector: "^popterm-"
-Passed:  26
+Passed:  31
 Failed:  0
 Skipped: 0
-Total:   26/26
+Total:   31/31
 
-26 passed (4.831 sec)
+31 passed (9.991 sec)
 #+END_EXAMPLE
 
 *** CI Integration Example

@@ -35,18 +35,49 @@
 (ert-deftest popterm-test-buffer-name ()
   "Test buffer name generation for different backends and instances."
   (should (equal (popterm--buffer-name nil 'vterm) "*popterm-vterm*"))
+  (should (equal (popterm--buffer-name nil 'ghostel) "*popterm-ghostel*"))
   (should (equal (popterm--buffer-name nil 'eat) "*popterm-eat*"))
   (should (equal (popterm--buffer-name nil 'shell) "*popterm-shell*"))
   (should (equal (popterm--buffer-name nil 'eshell) "*popterm-eshell*"))
   (should (equal (popterm--buffer-name "test" 'vterm) "*popterm-vterm[test]*"))
+  (should (equal (popterm--buffer-name "test" 'ghostel) "*popterm-ghostel[test]*"))
   (should (equal (popterm--buffer-name "my-project" 'eat) "*popterm-eat[my-project]*")))
 
 (ert-deftest popterm-test-mode-mapping ()
   "Test backend to mode symbol mapping."
   (should (eq (popterm--mode 'vterm) 'vterm-mode))
+  (should (eq (popterm--mode 'ghostel) 'ghostel-mode))
   (should (eq (popterm--mode 'eat) 'eat-mode))
   (should (eq (popterm--mode 'shell) 'shell-mode))
   (should (eq (popterm--mode 'eshell) 'eshell-mode)))
+
+(ert-deftest popterm-test-ghostel-create-renames-buffer ()
+  "Test Ghostel backend creation preserves Popterm buffer names."
+  (let ((created-buffer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &optional _filename _noerror)
+                     (eq feature 'ghostel)))
+                  ((symbol-function 'ghostel)
+                   (lambda ()
+                     (setq created-buffer (generate-new-buffer "*ghostel*"))
+                     (switch-to-buffer created-buffer))))
+          (should
+           (eq (popterm--ghostel-create "*popterm-ghostel[test]*")
+               created-buffer))
+          (should (equal (buffer-name created-buffer)
+                         "*popterm-ghostel[test]*")))
+      (when (buffer-live-p created-buffer)
+        (kill-buffer created-buffer)))))
+
+(ert-deftest popterm-test-popterm-ghostel-wrapper ()
+  "Test `popterm-ghostel' dispatches to `popterm-toggle'."
+  (let ((called-args nil))
+    (cl-letf (((symbol-function 'popterm-toggle)
+               (lambda (&optional name backend)
+                 (setq called-args (list name backend)))))
+      (popterm-ghostel "named")
+      (should (equal called-args '("named" ghostel))))))
 
 ;;; ── Directory and Path Tests ──────────────────────────────────────────────────
 
@@ -95,6 +126,29 @@
   (with-temp-buffer
     (setq default-directory nil)
     (should (null (popterm-cd-string (current-buffer))))))
+
+(ert-deftest popterm-test-send-cd-ghostel ()
+  "Test auto-cd sends a carriage-return terminated command to Ghostel."
+  (let ((sent-command nil)
+        (term-buf (generate-new-buffer " *popterm-ghostel-cd*"))
+        (source-buf (generate-new-buffer " *popterm-source-cd*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer term-buf
+            (setq major-mode 'ghostel-mode)
+            (setq ghostel--process 'ghostel-proc))
+          (with-current-buffer source-buf
+            (setq default-directory "/tmp/"))
+          (cl-letf (((symbol-function 'process-live-p)
+                     (lambda (process)
+                       (eq process 'ghostel-proc)))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_process string)
+                       (setq sent-command string))))
+            (popterm--send-cd term-buf source-buf)
+            (should (equal sent-command "cd /tmp\r"))))
+      (kill-buffer term-buf)
+      (kill-buffer source-buf))))
 
 (ert-deftest popterm-test-project-root-graceful-nil ()
   "Test project-root returns nil gracefully for buffers without projects."
@@ -308,6 +362,40 @@
       (funcall scheduled-fn)
       (should (eq focused-frame 'popterm-frame)))))
 
+(ert-deftest popterm-test-posframe-show-hides-mode-line ()
+  "Verify posframe display suppresses the buffer mode line."
+  (let ((buffer (get-buffer-create "*popterm-modeline*"))
+        (captured-args nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq-local mode-line-format '(" Demo")))
+          (cl-letf (((symbol-function 'require)
+                     (lambda (_feature &optional _filename _noerror) t))
+                    ((symbol-function 'posframe-show)
+                     (lambda (&rest args)
+                       (setq captured-args args)
+                       'fake-frame))
+                    ((symbol-function 'select-frame-set-input-focus) #'ignore)
+                    ((symbol-function 'run-with-timer)
+                     (lambda (&rest _args) 'fake-timer))
+                    ((symbol-function 'popterm--install-display-buffer-guard) #'ignore)
+                    ((symbol-function 'popterm--install-focus-guard) #'ignore)
+                    ((symbol-function 'popterm--install-theme-watch) #'ignore))
+            (popterm--posframe-show buffer)
+            (with-current-buffer buffer
+              (should (null mode-line-format)))
+            (should (equal popterm--saved-mode-line-format '(" Demo")))
+            (should (equal (plist-get (cdr captured-args) :respect-mode-line)
+                           nil))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (setq popterm--frame nil
+            popterm--frame-buffer nil
+            popterm--saved-mode-line-format nil
+            popterm--focus-timer nil
+            popterm--active-display-method nil))))
+
 (ert-deftest popterm-test-posframe-hide-cleans-focus-timer ()
   "Verify `popterm--posframe-hide' cancels and clears the focus timer."
   (let ((popterm--focus-timer (run-with-timer 10 nil #'ignore))
@@ -319,6 +407,31 @@
               ((symbol-function 'select-frame-set-input-focus) #'ignore))
       (popterm--posframe-hide)
       (should (null popterm--focus-timer)))))
+
+(ert-deftest popterm-test-cleanup-restores-mode-line ()
+  "Verify posframe cleanup restores the original mode line."
+  (let ((buffer (get-buffer-create "*popterm-restore-modeline*"))
+        (original '(" Demo"))
+        (popterm--frame-buffer nil)
+        (popterm--saved-mode-line-format nil)
+        (popterm--active-display-method 'posframe))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq-local mode-line-format nil))
+          (setq popterm--frame-buffer buffer
+                popterm--saved-mode-line-format original)
+          (cl-letf (((symbol-function 'popterm--remove-focus-guard) #'ignore)
+                    ((symbol-function 'popterm--remove-display-buffer-guard) #'ignore)
+                    ((symbol-function 'popterm--remove-theme-watch) #'ignore))
+            (popterm--cleanup-posframe-state))
+          (with-current-buffer buffer
+            (should (equal mode-line-format original)))
+          (should (null popterm--saved-mode-line-format))
+          (should (null popterm--frame-buffer))
+          (should (null popterm--active-display-method)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest popterm-test-hidehandler-cleans-daemon-hidden-posframe ()
   "Verify posframe daemon hides clear Popterm state and guards."

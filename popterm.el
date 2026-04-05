@@ -39,7 +39,7 @@
 ;;   fullscreen — full-frame buffer switch
 ;;
 ;; Backends (auto-detected at runtime, no hard dependency):
-;;   vterm / eat / shell / eshell
+;;   vterm / ghostel / eat / shell / eshell
 ;;
 ;; Quick start:
 ;;   (use-package popterm
@@ -67,11 +67,12 @@
 
 (defcustom popterm-backend 'vterm
   "Terminal backend to use.
-One of `vterm', `eat', `shell', or `eshell'."
-  :type '(choice (const :tag "vterm"  vterm)
-                 (const :tag "eat"    eat)
-                 (const :tag "shell"  shell)
-                 (const :tag "eshell" eshell))
+One of `vterm', `ghostel', `eat', `shell', or `eshell'."
+  :type '(choice (const :tag "vterm"   vterm)
+                 (const :tag "ghostel" ghostel)
+                 (const :tag "eat"     eat)
+                 (const :tag "shell"   shell)
+                 (const :tag "eshell"  eshell))
   :group 'popterm)
 
 (defcustom popterm-display-method 'posframe
@@ -161,12 +162,14 @@ on a slow compositor."
 
 ;;; ── Internal state ────────────────────────────────────────────────────────────
 
-(defvar popterm--frame         nil "Active posframe child frame.")
-(defvar popterm--frame-buffer  nil "Buffer displayed in the active posframe.")
-(defvar popterm--window        nil "Active window-split window.")
+(defvar popterm--frame nil "Active posframe child frame.")
+(defvar popterm--frame-buffer nil "Buffer displayed in the active posframe.")
+(defvar popterm--window nil "Active window-split window.")
 (defvar popterm--source-buffer nil "Buffer active before the last toggle.")
 (defvar popterm--active-display-method nil
   "Display method currently used by the active Popterm session.")
+(defvar popterm--saved-mode-line-format nil
+  "Original `mode-line-format' for the active posframe buffer.")
 (defvar popterm--inhibit-hidehandler nil
   "Non-nil while the posframe is being shown, inhibiting the hidehandler.
 Set to t by `popterm--posframe-show' and cleared after
@@ -300,35 +303,63 @@ current buffer.  `cl-pushnew' keeps the operation idempotent."
 ;; exactly this cross-package dynamic-variable reference pattern.
 (defvar eat-buffer-name)
 (defvar eshell-buffer-name)
+(defvar ghostel-buffer-name)
+(defvar ghostel--process)
+(declare-function ghostel "ghostel" ())
 ;; vterm-buffer-name is handled via a direct argument (see vterm backend below)
 ;; so no defvar is needed for it.
 
 (defsubst popterm--mode (backend)
   "Return the major-mode symbol for BACKEND."
   (pcase backend
-    ('vterm  'vterm-mode)
-    ('eat    'eat-mode)
-    ('shell  'shell-mode)
-    ('eshell 'eshell-mode)))
+    ('vterm   'vterm-mode)
+    ('ghostel 'ghostel-mode)
+    ('eat     'eat-mode)
+    ('shell   'shell-mode)
+    ('eshell  'eshell-mode)))
 
 (defun popterm--buffer-name (&optional name backend)
   "Return canonical buffer name for BACKEND with optional instance NAME."
   (let ((tag (pcase (or backend popterm-backend)
-               ('vterm  "vterm")
-               ('eat    "eat")
-               ('shell  "shell")
-               ('eshell "eshell"))))
+               ('vterm   "vterm")
+               ('ghostel "ghostel")
+               ('eat     "eat")
+               ('shell   "shell")
+               ('eshell  "eshell"))))
     (if name
         (format "*popterm-%s[%s]*" tag name)
       (format "*popterm-%s*" tag))))
+
+(defun popterm--ghostel-create (buffer-name)
+  "Create a fresh Ghostel terminal buffer named BUFFER-NAME.
+
+Ghostel's public `ghostel' command always switches to the new buffer and
+uses an internal counter to derive the final name.  Popterm wraps that
+entry point in `save-window-excursion' to preserve the user's layout, then
+renames the resulting buffer to BUFFER-NAME so named instances keep the
+same naming semantics as the other backends."
+  (unless (require 'ghostel nil t)
+    (user-error "popterm: Ghostel not installed"))
+  (let ((buffer
+         (save-window-excursion
+           (save-current-buffer
+             (let ((ghostel-buffer-name buffer-name))
+               (ghostel)
+               (current-buffer))))))
+    (unless (buffer-live-p buffer)
+      (error "Popterm: Ghostel failed to create a buffer"))
+    (with-current-buffer buffer
+      (unless (string= (buffer-name buffer) buffer-name)
+        (rename-buffer buffer-name t)))
+    (get-buffer buffer-name)))
 
 (defun popterm--create (name backend)
   "Create a fresh terminal buffer for BACKEND named NAME.
 Activates `popterm-mode' and returns the buffer.
 
 `display-buffer-alist' is temporarily overridden to `display-buffer-no-window'
-so vterm/eat initialize their PTY with correct frame dimensions without
-popping a window or disturbing the current layout."
+so backends that initialize themselves by displaying a buffer do not pop a
+window or disturb the current layout during creation."
   (let* ((display-buffer-alist
           '((".*" (display-buffer-no-window) (allow-no-window . t))))
          (bname (popterm--buffer-name name backend))
@@ -343,6 +374,8 @@ popping a window or disturbing the current layout."
                      (vterm bname)
                      (get-buffer bname))
                  (user-error "popterm: Vterm not installed")))
+              ('ghostel
+               (popterm--ghostel-create bname))
               ('eat
                ;; eat-buffer-name is declared special above via (defvar),
                ;; so this let creates a true dynamic binding.
@@ -479,6 +512,11 @@ correct idioms for their respective backends."
              (fboundp 'vterm-send-return))
         (vterm-send-string cmd)
         (vterm-send-return))
+       ((and (derived-mode-p 'ghostel-mode)
+             (boundp 'ghostel--process)
+             ghostel--process
+             (process-live-p ghostel--process))
+        (process-send-string ghostel--process (concat cmd "\r")))
        ((and (derived-mode-p 'eat-mode)
              (fboundp 'eat-term-send-string)
              (fboundp 'eat-self-input)
@@ -582,12 +620,20 @@ The guard is *not* triggered when:
     (cancel-timer popterm--focus-timer)
     (setq popterm--focus-timer nil)))
 
+(defun popterm--restore-posframe-buffer-state ()
+  "Restore buffer-local state temporarily changed for posframe display."
+  (when (buffer-live-p popterm--frame-buffer)
+    (with-current-buffer popterm--frame-buffer
+      (setq-local mode-line-format popterm--saved-mode-line-format)))
+  (setq popterm--saved-mode-line-format nil))
+
 (defun popterm--cleanup-posframe-state ()
   "Remove Popterm's posframe guards and clear its session state."
   (popterm--remove-focus-guard)
   (popterm--remove-display-buffer-guard)
   (popterm--remove-theme-watch)
   (popterm--cancel-focus-timer)
+  (popterm--restore-posframe-buffer-state)
   (setq popterm--inhibit-hidehandler nil
         popterm--frame nil
         popterm--frame-buffer nil)
@@ -692,30 +738,41 @@ Fixes posframe#155 and Centaur Emacs issue #482."
   "Show BUFFER in a centered posframe child frame."
   (require 'posframe)
   (let* ((w (max popterm-posframe-min-width
-                 (round (* (frame-width)  popterm-posframe-width-ratio))))
-         (h (round (* (frame-height) popterm-posframe-height-ratio))))
+                 (round (* (frame-width) popterm-posframe-width-ratio))))
+         (h (round (* (frame-height) popterm-posframe-height-ratio)))
+         (frame nil))
     (setq popterm--active-display-method 'posframe
           popterm--frame-buffer buffer)
-    (setq popterm--frame
-          (with-no-warnings
-            (posframe-show
-             buffer
-             :poshandler            (or popterm-posframe-poshandler
-                                        #'posframe-poshandler-frame-center)
-             :hidehandler           #'popterm--posframe-hidehandler
-             :left-fringe           8
-             :right-fringe          8
-             :width                 w
-             :height                h
-             :min-width             w
-             :min-height            h
-             :internal-border-width popterm-posframe-border-width
-             :internal-border-color (face-background 'region  nil t)
-             :background-color      (face-background 'default nil t)
-             :foreground-color      (face-foreground 'default nil t)
-             :override-parameters  '((cursor-type . t))
-             :respect-mode-line     t
-             :accept-focus          t)))
+    (with-current-buffer buffer
+      ;; Hide the mode line inside the popup for all backends.  Ghostel keeps
+      ;; a normal `mode-line-format', while vterm/eat often appear modeless in
+      ;; practice; suppressing it here keeps posframe presentation consistent.
+      (setq popterm--saved-mode-line-format mode-line-format)
+      (setq-local mode-line-format nil))
+    (unwind-protect
+        (setq frame
+              (with-no-warnings
+                (posframe-show
+                 buffer
+                 :poshandler (or popterm-posframe-poshandler
+                                 #'posframe-poshandler-frame-center)
+                 :hidehandler #'popterm--posframe-hidehandler
+                 :left-fringe 8
+                 :right-fringe 8
+                 :width w
+                 :height h
+                 :min-width w
+                 :min-height h
+                 :internal-border-width popterm-posframe-border-width
+                 :internal-border-color (face-background 'region nil t)
+                 :background-color (face-background 'default nil t)
+                 :foreground-color (face-foreground 'default nil t)
+                 :override-parameters '((cursor-type . t))
+                 :respect-mode-line nil
+                 :accept-focus t)))
+      (unless frame
+        (popterm--restore-posframe-buffer-state)))
+    (setq popterm--frame frame)
     ;; Inhibit the hidehandler during the focus-transfer window.
     ;; Cancel any in-flight timer first: rapid key-repeat within the delay
     ;; window would otherwise spawn multiple timers, and the earliest would
@@ -898,16 +955,25 @@ a new buffer when none exists in scope."
 ;;; ── Backend convenience wrappers ─────────────────────────────────────────────
 
 ;;;###autoload
-(defun popterm-vterm  (&optional name)
+(defun popterm-vterm (&optional name)
   "Toggle a vterm popup for optional instance NAME.
 Ignores `popterm-backend' setting."
-  (interactive) (popterm-toggle name 'vterm))
+  (interactive)
+  (popterm-toggle name 'vterm))
+
+;;;###autoload
+(defun popterm-ghostel (&optional name)
+  "Toggle a Ghostel popup for optional instance NAME.
+Ignores `popterm-backend' setting."
+  (interactive)
+  (popterm-toggle name 'ghostel))
 
 ;;;###autoload
 (defun popterm-eat (&optional name)
   "Toggle an eat popup for optional instance NAME.
 Ignores `popterm-backend' setting."
-  (interactive) (popterm-toggle name 'eat))
+  (interactive)
+  (popterm-toggle name 'eat))
 
 ;;;###autoload
 (defun popterm-shell (&optional name)
