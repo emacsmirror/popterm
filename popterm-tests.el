@@ -3,9 +3,6 @@
 ;; Copyright (C) 2026
 
 ;; Author: Chetan Koneru <kchetan.hadoop@gmail.com>
-;; Version: 1.0.0
-;; Package-Requires: ((emacs "28.1"))
-
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:

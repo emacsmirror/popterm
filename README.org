@@ -4,12 +4,13 @@
 *A smart, posframe-based terminal toggler for Emacs.*
 
 ~popterm~ merges the best paradigms of modern Emacs terminal management into a
-single package. It combines the aesthetic centered child-frames, the named-instance multiplexing of ~toggle-term.el~, and the TRAMP-aware scope-locking of ~vterm-toggle~.
+single package. It combines centered child-frame display, the named-instance
+multiplexing of ~toggle-term.el~, and the TRAMP-aware scope-locking of
+~vterm-toggle~.
 
 Whether you use ~vterm~, ~ghostel~, ~eat~, ~shell~, or ~eshell~, ~popterm~
-provides a flawless, context-aware pop-up terminal experience that respects
-your window layouts, asynchronous compositor events, and background
-processes.
+provides a context-aware pop-up terminal experience that respects your window
+layouts, asynchronous compositor events, and background processes.
 
 ** ✨ Features
 
@@ -337,7 +338,8 @@ to survey all active instances at any time.
 
 *** Conflict when opening multiple posframe
 
-see - https://github.com/tumashu/posframe/issues/155
+This behavior is related to a known upstream posframe issue:
+[[https://github.com/tumashu/posframe/issues/155][posframe#155]].
 
 This is now handled natively by ~popterm--posframe-hidehandler~.  The hidehandler
 combines the focus-delay timer, parent/child-frame checks, and session-state
@@ -434,18 +436,8 @@ The test suite covers:
 
 *** Expected Output
 
-All tests should pass. The exact count will change as coverage grows. A current
-run looks like:
-
-#+BEGIN_EXAMPLE
-Selector: "^popterm-"
-Passed:  31
-Failed:  0
-Skipped: 0
-Total:   31/31
-
-31 passed (9.991 sec)
-#+END_EXAMPLE
+All tests should pass. The exact number of tests and runtime will change as the
+suite evolves, so treat the batch output as informational rather than fixed.
 
 *** CI Integration Example
 
@@ -461,10 +453,10 @@ jobs:
       matrix:
         emacs_version: ['28.1', '28.2', '29.1']
     steps:
-      - uses: purcell/setup-emacs@master
+      - uses: purcell/setup-emacs@v6
         with:
           version: ${{ matrix.emacs_version }}
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           emacs -batch -l package --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \

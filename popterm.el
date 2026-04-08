@@ -134,7 +134,9 @@ When nil, `popterm-toggle-cd' is a no-op if no terminal is found in scope."
   (when (fboundp 'posframe-poshandler-frame-center)
     #'posframe-poshandler-frame-center)
   "Position handler passed to `posframe-show'."
-  :type 'function
+  :type '(choice (const :tag "Frame center" posframe-poshandler-frame-center)
+                 (function :tag "Custom function")
+                 (const :tag "Use posframe default" nil))
   :group 'popterm)
 
 (defcustom popterm-posframe-focus-delay 0.35
@@ -209,7 +211,7 @@ posframe session is active.")
   "`display-buffer-alist' entry that blocks window redisplay of popterm buffers.")
 
 (defconst popterm--display-buffer-prefix "*popterm-"
-  "Canonical buffer-name prefix used when Popterm creates terminal buffers.")
+  "Canonical prefix for names of terminal buffers created by Popterm.")
 
 (defvar-local popterm--managed-buffer nil
   "Non-nil in buffers created and managed by Popterm.
@@ -292,8 +294,6 @@ to ORIG with BUFFER-OR-NAME unchanged."
     (advice-add 'posframe--kill-buffer :around
                 #'popterm--preserve-buffer-during-posframe-delete)))
 
-(popterm--install-posframe-kill-buffer-advice)
-
 ;;; ── Minor mode + vterm keymap passthrough ─────────────────────────────────────
 
 (defvar popterm-term-map
@@ -347,14 +347,27 @@ current buffer.  `cl-pushnew' keeps the operation idempotent."
 ;; package or setting a default — used widely in cl-lib and ELPA packages for
 ;; exactly this cross-package dynamic-variable reference pattern.
 (defvar eat-buffer-name)
+(defvar eat-terminal)
 (defvar eshell-buffer-name)
 (defvar ghostel-buffer-name)
 (defvar ghostel--process)
+(declare-function eat "eat" ())
+(declare-function eat-self-input "eat" (&optional n event))
+(declare-function eat-term-send-string "eat" (terminal string))
+(declare-function eshell "esh-mode" (&optional arg))
+(declare-function eshell-send-input "esh-mode" ())
 (declare-function ghostel "ghostel" ())
+(declare-function posframe-hide "posframe" (buffer-or-name))
+(declare-function posframe-show "posframe" (buffer-or-name &rest args))
+(declare-function shell "shell" (&optional buffer))
+(declare-function vterm "vterm" (&optional buffer-name))
+(declare-function vterm-reset-cursor-point "vterm" ())
+(declare-function vterm-send-return "vterm" ())
+(declare-function vterm-send-string "vterm" (string))
 ;; vterm-buffer-name is handled via a direct argument (see vterm backend below)
 ;; so no defvar is needed for it.
 
-(defsubst popterm--mode (backend)
+(defun popterm--mode (backend)
   "Return the major-mode symbol for BACKEND."
   (pcase backend
     ('vterm   'vterm-mode)
@@ -783,6 +796,7 @@ Fixes posframe#155 and Centaur Emacs issue #482."
 (defun popterm--posframe-show (buffer)
   "Show BUFFER in a centered posframe child frame."
   (require 'posframe)
+  (popterm--install-posframe-kill-buffer-advice)
   (let* ((w (max popterm-posframe-min-width
                  (round (* (frame-width) popterm-posframe-width-ratio))))
          (h (round (* (frame-height) popterm-posframe-height-ratio)))
