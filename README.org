@@ -1,6 +1,8 @@
 #+TITLE: popterm.el
 #+DESCRIPTION: A smart, posframe-based terminal toggler for Emacs.
 
+[[tests][https://github.com/CsBigDataHub/popterm.el/actions/workflows/tests.yml/badge.svg]]
+
 *A smart, posframe-based terminal toggler for Emacs.*
 
 ~popterm~ merges the best paradigms of modern Emacs terminal management into a
