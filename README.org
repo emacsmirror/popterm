@@ -443,33 +443,6 @@ The test suite covers:
 All tests should pass. The exact number of tests and runtime will change as the
 suite evolves, so treat the batch output as informational rather than fixed.
 
-*** CI Integration Example
-
-For GitHub Actions:
-
-#+BEGIN_SRC yaml
-name: Tests
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        emacs_version: ['28.1', '28.2', '29.1']
-    steps:
-      - uses: purcell/setup-emacs@v6
-        with:
-          version: ${{ matrix.emacs_version }}
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          emacs -batch -l package --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
-            --eval "(package-refresh-contents)" \
-            --eval "(package-install 'posframe)"
-      - name: Run tests
-        run: emacs -batch -l ert -l popterm.el -l popterm-tests.el -f ert-run-tests-batch-and-exit
-#+END_SRC
-
 ** 🤝 Contributing
 
 Bug reports, feature requests, and pull requests are welcome.
