@@ -27,6 +27,10 @@ layouts, asynchronous compositor events, and background processes.
 - *Agnostic Terminal Support:* Seamlessly supports ~vterm~, ~ghostel~, ~eat~,
   ~shell~, and ~eshell~ out of the box. No hard dependencies required—it
   auto-detects what you have installed.
+- *Smart Multi-Instance Management:* Create multiple terminal instances with
+  ~C-u~ prefix (auto-numbered "1", "2", "3"...), cycle between them with
+  flicker-free in-place swapping, and select from a ~completing-read~ menu when
+  multiple terminals exist.
 - *Smart Auto-CD & TRAMP Awareness:* Automatically changes the terminal
   directory to match the buffer you toggled it from. It correctly parses TRAMP
   remote paths so SSH commands execute safely on the remote host without local
@@ -99,19 +103,20 @@ Clone the repository and add the directory to your ~load-path~:
 
 *** Global Commands
 
-| Command                   | Default Binding | Description                                                |
-|---------------------------+-----------------+------------------------------------------------------------|
-| ~popterm-toggle~          | ~C-`~           | Toggle the default terminal popup                          |
-| ~popterm-toggle-cd~       | ~C-~~           | Toggle and ~cd~ to the originating buffer's directory      |
-| ~popterm-toggle-named~    | ~C-c t n~       | Toggle a named instance, e.g. ~build~, ~server~, ~repl~   |
-| ~popterm-window-toggle~   | ~f9~            | Force a bottom window split regardless of display method   |
-| ~popterm-posframe-toggle~ | —               | Force posframe regardless of display method                |
-| ~popterm-find~            | ~C-c t f~       | ~completing-read~ picker over all active popterm buffers   |
-| ~popterm-vterm~           | —               | Toggle a vterm popup regardless of ~popterm-backend~       |
-| ~popterm-ghostel~         | —               | Toggle a Ghostel popup regardless of ~popterm-backend~     |
-| ~popterm-eat~             | —               | Toggle an eat popup regardless of ~popterm-backend~        |
-| ~popterm-shell~           | —               | Toggle a shell popup regardless of ~popterm-backend~       |
-| ~popterm-eshell~          | —               | Toggle an eshell popup regardless of ~popterm-backend~     |
+| Command                   | Default Binding | Description                                                       |
+|---------------------------+-----------------+-------------------------------------------------------------------|
+| ~popterm-toggle~          | ~C-`~           | Toggle the default terminal popup                                 |
+| ~popterm-toggle~          | ~C-u C-`~       | Create a new terminal instance (prompts for name)                 |
+| ~popterm-toggle-cd~       | ~C-~~           | Toggle and ~cd~ to the originating buffer's directory             |
+| ~popterm-toggle-named~    | ~C-c t n~       | Toggle a named instance, e.g. ~build~, ~server~, ~repl~          |
+| ~popterm-window-toggle~   | ~f9~            | Force a bottom window split regardless of display method          |
+| ~popterm-posframe-toggle~ | —               | Force posframe regardless of display method                       |
+| ~popterm-find~            | ~C-c t f~       | ~completing-read~ picker over all active popterm buffers          |
+| ~popterm-vterm~           | —               | Toggle a vterm popup regardless of ~popterm-backend~              |
+| ~popterm-ghostel~         | —               | Toggle a Ghostel popup regardless of ~popterm-backend~            |
+| ~popterm-eat~             | —               | Toggle an eat popup regardless of ~popterm-backend~               |
+| ~popterm-shell~           | —               | Toggle a shell popup regardless of ~popterm-backend~              |
+| ~popterm-eshell~          | —               | Toggle an eshell popup regardless of ~popterm-backend~            |
 
 *** Inside the Terminal (~popterm-mode~)
 
@@ -120,13 +125,13 @@ For ~vterm~, Popterm also installs buffer-local passthrough exceptions so those
 keys reach Emacs instead of the terminal process (see
 [[*How the vterm Keymap Trap Is Solved][How the vterm Keymap Trap Is Solved]]):
 
-| Binding     | Command          | Description                                         |
-|-------------+------------------+-----------------------------------------------------|
-| ~C-<next>~  | ~popterm-next~   | Cycle forward through terminals in the current scope |
-| ~C-<prior>~ | ~popterm-prev~   | Cycle backward                                       |
-| ~C-q~       | ~popterm-return~ | Hide and return to the originating source buffer     |
+| Binding     | Command          | Description                                              |
+|-------------+------------------+----------------------------------------------------------|
+| ~C-<next>~  | ~popterm-next~   | Cycle forward through terminals (flicker-free in-place)  |
+| ~C-<prior>~ | ~popterm-prev~   | Cycle backward through terminals (flicker-free in-place) |
+| ~C-q~       | ~popterm-return~ | Hide and return to the originating source buffer         |
 
-*** Named Instances
+*** Named Instances & Multi-Instance Management
 
 ~popterm~ supports running multiple isolated terminal instances simultaneously.
 Buffers are named ~*popterm-BACKEND[NAME]*~:
@@ -141,8 +146,34 @@ Buffers are named ~*popterm-BACKEND[NAME]*~:
 (global-set-key (kbd "C-c t r") (lambda () (interactive) (popterm-toggle "repl")))
 #+END_SRC
 
-Inside the terminal, use ~C-<next>~ and ~C-<prior>~ to cycle between all
-instances in your current scope.
+**** Creating Multiple Terminals
+
+Use ~C-u~ (universal argument) with ~popterm-toggle~ to create a new terminal
+instance. You'll be prompted for a name, with auto-generated numeric defaults
+("1", "2", "3", etc.):
+
+#+BEGIN_SRC emacs-lisp
+;; Press C-u C-` to create a new terminal
+;; Prompts: "New terminal name (default 2): "
+#+END_SRC
+
+When multiple terminals exist for the current scope:
+- If the popup is *visible*, pressing ~C-`~ hides it
+- If the popup is *hidden*, pressing ~C-`~ shows a ~completing-read~ menu to
+  select which terminal to display
+- If only one terminal exists, it opens directly without prompting
+
+**** Cycling Between Terminals
+
+Inside any terminal, use ~C-<next>~ and ~C-<prior>~ to cycle between all
+instances in your current scope:
+
+- When the popup is *visible*, cycling swaps the buffer in-place without
+  hide/show flicker
+- When the popup is *hidden*, cycling shows the next/previous terminal
+- The echo area displays your position: ~"popterm [2/5]"~ (current/total)
+
+The cycling order respects your ~popterm-scope~ setting (project, frame, etc.).
 
 ** ⚙️ Configuration
 
@@ -454,6 +485,8 @@ M-x ert RET popterm-test-buffer-name RET
 The test suite covers:
 
 - *Basic API:* Buffer name generation, mode mapping, backend wrapper dispatch
+- *Multi-Instance Cycling:* Numeric index generation, flicker-free buffer swapping,
+  cycle position messages, C-u prefix creation, completion menu triggers
 - *Ghostel Integration:* Buffer creation/renaming and Ghostel auto-~cd~ behavior
 - *Directory & Path Handling:* Local/remote paths, TRAMP awareness, cd command generation
 - *Scope & Filtering:* Project scope, frame scope, multi-frame visibility, buffer list filtering

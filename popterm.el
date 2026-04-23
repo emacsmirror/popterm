@@ -90,7 +90,7 @@ One of `vterm', `ghostel', `eat', `shell', or `eshell'."
 nil         — reuse any popterm buffer.
 `project'   — only buffers belonging to the current project root.
 `frame'     — only buffers not visible in another frame.
-`dedicated' — one fixed buffer per backend (ignore other instances)."
+`dedicated' — all buffers belonging to the current backend."
   :type '(choice (const :tag "All buffers"  nil)
                  (const :tag "Project"      project)
                  (const :tag "Frame"        frame)
@@ -228,10 +228,11 @@ Popterm cannot rely solely on `buffer-name' to recognize its terminals.")
   "Return non-nil when BUFFER belongs to BACKEND.
 Prefers Popterm's buffer-local metadata and falls back to the backend's
 major mode for buffers created before that metadata existed."
-  (with-current-buffer buffer
-    (or (eq popterm--buffer-backend backend)
-        (and (null popterm--buffer-backend)
-             (derived-mode-p (popterm--mode backend))))))
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (or (eq popterm--buffer-backend backend)
+          (and (null popterm--buffer-backend)
+               (derived-mode-p (popterm--mode backend)))))))
 
 (defun popterm--buffer-instance-matches-p (buffer name backend)
   "Return non-nil when BUFFER matches instance NAME for BACKEND.
@@ -256,13 +257,14 @@ Ghostel remain discoverable."
                        ((bufferp buffer-or-name) buffer-or-name)
                        ((stringp buffer-or-name) (get-buffer buffer-or-name))
                        (t nil))))
-    (with-current-buffer buffer
-      (and (or popterm--managed-buffer
-               (bound-and-true-p popterm-mode)
-               (string-prefix-p popterm--display-buffer-prefix
-                                (buffer-name buffer)))
-           (or (null backend)
-               (popterm--buffer-backend-p buffer backend))))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (and (or popterm--managed-buffer
+                 (bound-and-true-p popterm-mode)
+                 (string-prefix-p popterm--display-buffer-prefix
+                                  (buffer-name buffer)))
+             (or (null backend)
+                 (popterm--buffer-backend-p buffer backend)))))))
 
 (defun popterm--preserve-buffer-during-posframe-delete (orig buffer-or-name)
   "Keep Popterm terminal buffers alive during external posframe cleanup.
@@ -515,7 +517,7 @@ usable directory, or the project backend does not implement
             (popterm--buffer-p buf b)
             (pcase popterm-scope
               ('nil        t)
-              ('dedicated  (popterm--buffer-instance-matches-p buf nil b))
+              ('dedicated  (popterm--buffer-backend-p buf b))
               ('frame      (popterm--not-in-other-frame frame buf))
               ('project    (and root
                                 (when-let ((dir (popterm--buffer-directory buf)))
@@ -563,35 +565,36 @@ Uses each backend's dedicated send + return API to avoid PTY newline
 issues: raw \\n is unreliable over a PTY (zsh/fish expect \\r).
 `vterm-send-return' and `eat-self-input' with symbol `return' are the
 correct idioms for their respective backends."
-  (when-let ((cmd (and (buffer-live-p source-buf)
-                       (popterm-cd-string source-buf))))
-    (with-current-buffer term-buf
-      (cond
-       ((and (derived-mode-p 'vterm-mode)
-             (fboundp 'vterm-send-string)
-             (fboundp 'vterm-send-return))
-        (vterm-send-string cmd)
-        (vterm-send-return))
-       ((and (derived-mode-p 'ghostel-mode)
-             (boundp 'ghostel--process)
-             ghostel--process
-             (process-live-p ghostel--process))
-        (process-send-string ghostel--process (concat cmd "\r")))
-       ((and (derived-mode-p 'eat-mode)
-             (fboundp 'eat-term-send-string)
-             (fboundp 'eat-self-input)
-             (boundp 'eat-terminal)
-             eat-terminal)
-        (eat-term-send-string eat-terminal cmd)
-        (eat-self-input 1 'return))
-       ((derived-mode-p 'comint-mode)
-        (goto-char (point-max))
-        (insert cmd)
-        (comint-send-input))
-       ((derived-mode-p 'eshell-mode)
-        (goto-char (point-max))
-        (insert cmd)
-        (eshell-send-input))))))
+  (when (and (buffer-live-p term-buf)
+             (buffer-live-p source-buf))
+    (when-let ((cmd (popterm-cd-string source-buf)))
+      (with-current-buffer term-buf
+        (cond
+         ((and (derived-mode-p 'vterm-mode)
+               (fboundp 'vterm-send-string)
+               (fboundp 'vterm-send-return))
+          (vterm-send-string cmd)
+          (vterm-send-return))
+         ((and (derived-mode-p 'ghostel-mode)
+               (boundp 'ghostel--process)
+               ghostel--process
+               (process-live-p ghostel--process))
+          (process-send-string ghostel--process (concat cmd "\r")))
+         ((and (derived-mode-p 'eat-mode)
+               (fboundp 'eat-term-send-string)
+               (fboundp 'eat-self-input)
+               (boundp 'eat-terminal)
+               eat-terminal)
+          (eat-term-send-string eat-terminal cmd)
+          (eat-self-input 1 'return))
+         ((derived-mode-p 'comint-mode)
+          (goto-char (point-max))
+          (insert cmd)
+          (comint-send-input))
+         ((derived-mode-p 'eshell-mode)
+          (goto-char (point-max))
+          (insert cmd)
+          (eshell-send-input)))))))
 
 ;;; ── Posframe focus guard ──────────────────────────────────────────────────────
 
@@ -981,24 +984,132 @@ between named instances and then pressing the toggle key hides correctly."
     ('fullscreen (switch-to-buffer buffer)
                  (goto-char (point-max)))))
 
+;;; ── Helper functions for multi-instance support ───────────────────────────────
+
+(defun popterm--next-numeric-index (&optional backend)
+  "Return the next available numeric index for BACKEND in current scope.
+Scans existing buffers and returns the lowest unused positive integer."
+  (let* ((b (or backend popterm-backend))
+         (bufs (popterm--buffer-list b))
+         (used-indices nil))
+    ;; Collect all numeric instance names
+    (dolist (buf bufs)
+      (with-current-buffer buf
+        (when-let ((name popterm--buffer-instance-name))
+          (when (string-match-p "^[0-9]+$" name)
+            (push (string-to-number name) used-indices)))))
+    ;; Find the next available index
+    (let ((idx 1))
+      (while (memq idx used-indices)
+        (setq idx (1+ idx)))
+      (number-to-string idx))))
+
+(defun popterm--show-in-place (buffer)
+  "Swap BUFFER into the currently visible popup without hide/show flicker.
+For posframe: update the frame's window buffer and state.
+For window: update the split window's buffer.
+For fullscreen: switch to buffer."
+  (pcase (popterm--effective-display-method)
+    ('posframe
+     (when (and (frame-live-p popterm--frame)
+                (buffer-live-p buffer))
+       (set-window-buffer (frame-root-window popterm--frame) buffer)
+       (setq popterm--frame-buffer buffer)
+       (with-current-buffer buffer
+         (goto-char (point-max))
+         (when (fboundp 'vterm-reset-cursor-point)
+           (vterm-reset-cursor-point)))))
+    ('window
+     (when (and (window-live-p popterm--window)
+                (buffer-live-p buffer))
+       (set-window-buffer popterm--window buffer)
+       (select-window popterm--window)
+       (with-current-buffer buffer
+         (goto-char (point-max)))))
+    ('fullscreen
+     (when (buffer-live-p buffer)
+       (switch-to-buffer buffer)
+       (goto-char (point-max))))))
+
+(defun popterm--cycle-message (buffer &optional backend)
+  "Display echo area message showing BUFFER's position in the buffer list.
+Format: \"popterm [N/M]\" where N is current position, M is total count."
+  (let* ((b (or backend popterm-backend))
+         (bufs (popterm--buffer-list b))
+         (idx (cl-position buffer bufs :test #'eq))
+         (total (length bufs)))
+    (when (and idx (> total 0))
+      (message "popterm [%d/%d]" (1+ idx) total))))
+
 ;;; ── Public commands ───────────────────────────────────────────────────────────
 
 ;;;###autoload
 (defun popterm-toggle (&optional name backend)
   "Toggle the terminal popup.
+With \\[universal-argument] prefix, create a new terminal instance, prompting for a name
+\(defaulting to the next numeric suffix like \"2\", \"3\").
+
+When multiple terminals exist for the current scope and the popup is hidden,
+show a completion menu to select which terminal to display.
+
 Optional NAME selects a named instance; optional BACKEND overrides
 `popterm-backend'.  Visibility is checked BEFORE any cleanup to prevent
 the window-mode toggle from recreating rather than hiding the terminal."
   (interactive)
-  (if (popterm--visible-p)
-      (popterm--hide)
-    (unless (eq popterm-display-method 'window)
-      (popterm--window-hide))
-    (setq popterm--source-buffer (current-buffer))
-    (let ((buf (popterm--get-or-create name (or backend popterm-backend))))
-      (popterm--show buf)
-      (when popterm-auto-cd
-        (popterm--send-cd buf popterm--source-buffer)))))
+  (cond
+   ;; If already visible, hide it
+   ((popterm--visible-p)
+    (popterm--hide))
+
+   ;; C-u prefix: create new terminal with prompted name
+   (current-prefix-arg
+    (let* ((b (or backend popterm-backend))
+           (default-name (popterm--next-numeric-index b))
+           (new-name (read-string (format "New terminal name (default %s): " default-name)
+                                  nil nil default-name)))
+      (unless (eq popterm-display-method 'window)
+        (popterm--window-hide))
+      (setq popterm--source-buffer (current-buffer))
+      (let ((buf (popterm--create new-name b)))
+        (popterm--show buf)
+        (when popterm-auto-cd
+          (popterm--send-cd buf popterm--source-buffer))
+        (message "Created new terminal: %s" (buffer-name buf)))))
+
+   ;; Multiple buffers exist: show completion
+   (t
+    (let* ((b (or backend popterm-backend))
+           (bufs (popterm--buffer-list b)))
+      (unless (eq popterm-display-method 'window)
+        (popterm--window-hide))
+      (setq popterm--source-buffer (current-buffer))
+      (let ((buf
+             (cond
+              ;; No buffers: create default
+              ((null bufs)
+               (popterm--get-or-create name b))
+              ;; One buffer: use it
+              ((= (length bufs) 1)
+               (car bufs))
+              ;; Multiple buffers: prompt
+              (t
+               (let* ((candidates
+                       (mapcar (lambda (buf)
+                                 (let ((label (or (buffer-local-value
+                                                   'popterm--buffer-instance-name buf)
+                                                  (buffer-name buf))))
+                                   (cons label buf)))
+                               bufs))
+                      (choice (completing-read
+                               (format "%d/%d Select terminal: "
+                                       (1+ (or (cl-position (car bufs) bufs) 0))
+                                       (length bufs))
+                               (mapcar #'car candidates)
+                               nil t)))
+                 (cdr (assoc choice candidates)))))))
+        (popterm--show buf)
+        (when popterm-auto-cd
+          (popterm--send-cd buf popterm--source-buffer)))))))
 
 ;;;###autoload
 (defun popterm-toggle-cd (&optional name backend)
@@ -1073,25 +1184,53 @@ Ignores `popterm-backend' setting."
 
 ;;;###autoload
 (defun popterm-next (&optional backend)
-  "Cycle forward through popterm buffers for BACKEND, respecting `popterm-scope'."
+  "Cycle forward through popterm buffers for BACKEND, respecting `popterm-scope'.
+If a popup is currently visible, cycle in place without closing.
+If no popup is visible, show the next buffer in a popup.
+Displays \"popterm [N/M]\" in the echo area showing position."
   (interactive)
-  (let* ((bufs (popterm--buffer-list backend))
-         (cur  (current-buffer))
-         (idx  (cl-position cur bufs :test #'eq))
-         (n    (length bufs)))
+  (let* ((b (or backend popterm-backend))
+         (bufs (popterm--buffer-list b))
+         (cur (if (popterm--visible-p)
+                  (or popterm--frame-buffer
+                      (and (window-live-p popterm--window)
+                           (window-buffer popterm--window))
+                      (current-buffer))
+                (current-buffer)))
+         (idx (cl-position cur bufs :test #'eq))
+         (n (length bufs)))
     (when bufs
-      (switch-to-buffer (nth (if idx (mod (1+ idx) n) 0) bufs)))))
+      (let ((next-buf (nth (if idx (mod (1+ idx) n) 0) bufs)))
+        (if (popterm--visible-p)
+            (popterm--show-in-place next-buf)
+          (setq popterm--source-buffer (current-buffer))
+          (popterm--show next-buf))
+        (popterm--cycle-message next-buf b)))))
 
 ;;;###autoload
 (defun popterm-prev (&optional backend)
-  "Cycle backward through popterm buffers for BACKEND, respecting `popterm-scope'."
+  "Cycle backward through popterm buffers for BACKEND, respecting `popterm-scope'.
+If a popup is currently visible, cycle in place without closing.
+If no popup is visible, show the previous buffer in a popup.
+Displays \"popterm [N/M]\" in the echo area showing position."
   (interactive)
-  (let* ((bufs (popterm--buffer-list backend))
-         (cur  (current-buffer))
-         (idx  (cl-position cur bufs :test #'eq))
-         (n    (length bufs)))
+  (let* ((b (or backend popterm-backend))
+         (bufs (popterm--buffer-list b))
+         (cur (if (popterm--visible-p)
+                  (or popterm--frame-buffer
+                      (and (window-live-p popterm--window)
+                           (window-buffer popterm--window))
+                      (current-buffer))
+                (current-buffer)))
+         (idx (cl-position cur bufs :test #'eq))
+         (n (length bufs)))
     (when bufs
-      (switch-to-buffer (nth (if idx (mod (1- idx) n) (1- n)) bufs)))))
+      (let ((prev-buf (nth (if idx (mod (1- idx) n) (1- n)) bufs)))
+        (if (popterm--visible-p)
+            (popterm--show-in-place prev-buf)
+          (setq popterm--source-buffer (current-buffer))
+          (popterm--show prev-buf))
+        (popterm--cycle-message prev-buf b)))))
 
 ;;;###autoload
 (defun popterm-find ()
@@ -1101,8 +1240,16 @@ Use `popterm-next'/`popterm-prev' for scope-aware cycling."
   (interactive)
   (let ((bufs (seq-filter #'popterm--buffer-p (buffer-list))))
     (if bufs
-        (switch-to-buffer
-         (completing-read "Popterm: " (mapcar #'buffer-name bufs) nil t))
+        (let* ((candidates
+                (mapcar (lambda (buf)
+                          (let ((label (or (buffer-local-value
+                                            'popterm--buffer-instance-name buf)
+                                           (buffer-name buf))))
+                            (cons label buf)))
+                  bufs))
+               (choice (completing-read "Popterm: "
+                                        (mapcar #'car candidates) nil t)))
+          (switch-to-buffer (cdr (assoc choice candidates))))
       (message "Popterm: No terminal buffers open"))))
 
 ;;; ── Return to source buffer ───────────────────────────────────────────────────
