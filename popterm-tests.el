@@ -890,26 +890,34 @@
       (kill-buffer buf))))
 
 (ert-deftest popterm-test-toggle-multi-buffer-completion ()
-  "Test multiple buffers trigger completing-read."
+  "Test multiple buffers trigger completing-read with instance names."
   (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
         (buf2 (generate-new-buffer "*popterm-vterm[2]*"))
-        (completing-read-called nil))
+        (completing-read-called nil)
+        (shown-buf nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'popterm--visible-p) (lambda () nil))
-                  ((symbol-function 'popterm--window-hide) #'ignore)
-                  ((symbol-function 'popterm--buffer-list)
-                   (lambda (_b) (list buf1 buf2)))
-                  ((symbol-function 'popterm--show) #'ignore)
-                  ((symbol-function 'popterm--send-cd) #'ignore)
-                  ((symbol-function 'completing-read)
-                   (lambda (_prompt collection &rest _args)
-                     (setq completing-read-called t)
-                     (car collection)))
-                  ((symbol-function 'get-buffer)
-                   (lambda (name)
-                     (if (equal name (buffer-name buf1)) buf1 buf2))))
-          (popterm-toggle)
-          (should completing-read-called))
+        (progn
+          (with-current-buffer buf1
+            (setq-local popterm--buffer-instance-name "build"))
+          (with-current-buffer buf2
+            (setq-local popterm--buffer-instance-name "server"))
+          (cl-letf (((symbol-function 'popterm--visible-p) (lambda () nil))
+                    ((symbol-function 'popterm--window-hide) #'ignore)
+                    ((symbol-function 'popterm--buffer-list)
+                     (lambda (_b) (list buf1 buf2)))
+                    ((symbol-function 'popterm--show)
+                     (lambda (b) (setq shown-buf b)))
+                    ((symbol-function 'popterm--send-cd) #'ignore)
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt collection &rest _args)
+                       (setq completing-read-called t)
+                       ;; Candidates should be instance names, not buffer names
+                       (should (member "build" collection))
+                       (should (member "server" collection))
+                       "build")))
+            (popterm-toggle)
+            (should completing-read-called)
+            (should (eq shown-buf buf1))))
       (kill-buffer buf1)
       (kill-buffer buf2))))
 

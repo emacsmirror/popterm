@@ -90,7 +90,7 @@ One of `vterm', `ghostel', `eat', `shell', or `eshell'."
 nil         — reuse any popterm buffer.
 `project'   — only buffers belonging to the current project root.
 `frame'     — only buffers not visible in another frame.
-`dedicated' — one fixed buffer per backend (ignore other instances)."
+`dedicated' — all buffers belonging to the current backend."
   :type '(choice (const :tag "All buffers"  nil)
                  (const :tag "Project"      project)
                  (const :tag "Frame"        frame)
@@ -517,7 +517,7 @@ usable directory, or the project backend does not implement
             (popterm--buffer-p buf b)
             (pcase popterm-scope
               ('nil        t)
-              ('dedicated  (popterm--buffer-instance-matches-p buf nil b))
+              ('dedicated  (popterm--buffer-backend-p buf b))
               ('frame      (popterm--not-in-other-frame frame buf))
               ('project    (and root
                                 (when-let ((dir (popterm--buffer-directory buf)))
@@ -1093,10 +1093,20 @@ the window-mode toggle from recreating rather than hiding the terminal."
                (car bufs))
               ;; Multiple buffers: prompt
               (t
-               (get-buffer
-                (completing-read "Select terminal: "
-                                 (mapcar #'buffer-name bufs)
-                                 nil t))))))
+               (let* ((candidates
+                       (mapcar (lambda (buf)
+                                 (let ((label (or (buffer-local-value
+                                                   'popterm--buffer-instance-name buf)
+                                                  (buffer-name buf))))
+                                   (cons label buf)))
+                               bufs))
+                      (choice (completing-read
+                               (format "%d/%d Select terminal: "
+                                       (1+ (or (cl-position (car bufs) bufs) 0))
+                                       (length bufs))
+                               (mapcar #'car candidates)
+                               nil t)))
+                 (cdr (assoc choice candidates)))))))
         (popterm--show buf)
         (when popterm-auto-cd
           (popterm--send-cd buf popterm--source-buffer)))))))
@@ -1230,8 +1240,16 @@ Use `popterm-next'/`popterm-prev' for scope-aware cycling."
   (interactive)
   (let ((bufs (seq-filter #'popterm--buffer-p (buffer-list))))
     (if bufs
-        (switch-to-buffer
-         (completing-read "Popterm: " (mapcar #'buffer-name bufs) nil t))
+        (let* ((candidates
+                (mapcar (lambda (buf)
+                          (let ((label (or (buffer-local-value
+                                            'popterm--buffer-instance-name buf)
+                                           (buffer-name buf))))
+                            (cons label buf)))
+                  bufs))
+               (choice (completing-read "Popterm: "
+                                        (mapcar #'car candidates) nil t)))
+          (switch-to-buffer (cdr (assoc choice candidates))))
       (message "Popterm: No terminal buffers open"))))
 
 ;;; ── Return to source buffer ───────────────────────────────────────────────────
