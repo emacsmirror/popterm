@@ -26,6 +26,11 @@
 
 (defvar vterm-keymap-exceptions)
 (defvar posframe--frame)
+(defvar ghostel--process)
+
+(declare-function popterm--next-numeric-index "popterm")
+(declare-function popterm--show-in-place "popterm")
+(declare-function popterm--cycle-message "popterm")
 
 ;;; ── Basic API Tests ───────────────────────────────────────────────────────────
 
@@ -738,6 +743,230 @@
 
       ;; Cleanup
       (mapc #'kill-buffer test-buffers))))
+
+;;; ── Multi-Instance Cycling Tests ──────────────────────────────────────────────
+
+(ert-deftest popterm-test-next-numeric-index-empty ()
+  "Test next numeric index returns \"1\" when no buffers exist."
+  (cl-letf (((symbol-function 'popterm--buffer-list)
+             (lambda (_backend) nil)))
+    (should (equal (popterm--next-numeric-index 'vterm) "1"))))
+
+(ert-deftest popterm-test-next-numeric-index-with-gaps ()
+  "Test next numeric index finds gaps in existing indices."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (buf3 (generate-new-buffer "*popterm-vterm[3]*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf1
+            (setq-local popterm--buffer-instance-name "1"))
+          (with-current-buffer buf3
+            (setq-local popterm--buffer-instance-name "3"))
+          (cl-letf (((symbol-function 'popterm--buffer-list)
+                     (lambda (_backend) (list buf1 buf3))))
+            (should (equal (popterm--next-numeric-index 'vterm) "2"))))
+      (kill-buffer buf1)
+      (kill-buffer buf3))))
+
+(ert-deftest popterm-test-next-numeric-index-skips-non-numeric ()
+  "Test next numeric index ignores non-numeric instance names."
+  (let ((buf (generate-new-buffer "*popterm-vterm[project]*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local popterm--buffer-instance-name "project"))
+          (cl-letf (((symbol-function 'popterm--buffer-list)
+                     (lambda (_backend) (list buf))))
+            (should (equal (popterm--next-numeric-index 'vterm) "1"))))
+      (kill-buffer buf))))
+
+(ert-deftest popterm-test-show-in-place-posframe ()
+  "Test show-in-place updates posframe buffer without hide/show."
+  (let* ((old-buf (generate-new-buffer "*popterm-old*"))
+         (new-buf (generate-new-buffer "*popterm-new*"))
+         (fake-frame (selected-frame))
+         (popterm--frame fake-frame)
+         (popterm--frame-buffer old-buf)
+         (set-win-buf-calls nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--effective-display-method)
+                   (lambda () 'posframe))
+                  ((symbol-function 'set-window-buffer)
+                   (lambda (win buf)
+                     (push (list win buf) set-win-buf-calls)))
+                  ((symbol-function 'frame-root-window)
+                   (lambda (_frame) 'root-win))
+                  ((symbol-function 'frame-live-p) (lambda (_f) t)))
+          (popterm--show-in-place new-buf)
+          (should (equal (caar set-win-buf-calls) 'root-win))
+          (should (eq (cadar set-win-buf-calls) new-buf))
+          (should (eq popterm--frame-buffer new-buf)))
+      (kill-buffer old-buf)
+      (kill-buffer new-buf))))
+
+(ert-deftest popterm-test-show-in-place-window ()
+  "Test show-in-place updates window buffer for window display method."
+  (let* ((new-buf (generate-new-buffer "*popterm-win-new*"))
+         (popterm--window (selected-window))
+         (set-calls nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--effective-display-method)
+                   (lambda () 'window))
+                  ((symbol-function 'window-live-p) (lambda (_w) t))
+                  ((symbol-function 'set-window-buffer)
+                   (lambda (win buf)
+                     (push (list win buf) set-calls)))
+                  ((symbol-function 'select-window) #'ignore))
+          (popterm--show-in-place new-buf)
+          (should (= (length set-calls) 1))
+          (should (eq (cadar set-calls) new-buf)))
+      (kill-buffer new-buf))))
+
+(ert-deftest popterm-test-cycle-message ()
+  "Test cycle message displays correct position format."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (buf2 (generate-new-buffer "*popterm-vterm[2]*"))
+        (last-msg nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--buffer-list)
+                   (lambda (_b) (list buf1 buf2)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq last-msg (apply #'format fmt args)))))
+          (popterm--cycle-message buf1 'vterm)
+          (should (equal last-msg "popterm [1/2]"))
+          (popterm--cycle-message buf2 'vterm)
+          (should (equal last-msg "popterm [2/2]")))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
+(ert-deftest popterm-test-toggle-prefix-creates-new ()
+  "Test C-u prefix in popterm-toggle creates a new terminal."
+  (let ((current-prefix-arg '(4))
+        (created-name nil)
+        (shown-buf nil))
+    (cl-letf (((symbol-function 'popterm--visible-p) (lambda () nil))
+              ((symbol-function 'popterm--window-hide) #'ignore)
+              ((symbol-function 'popterm--next-numeric-index)
+               (lambda (_b) "2"))
+              ((symbol-function 'read-string)
+               (lambda (_prompt &optional _initial _history default)
+                 default))
+              ((symbol-function 'popterm--create)
+               (lambda (name _backend)
+                 (setq created-name name)
+                 (generate-new-buffer "*popterm-test-new*")))
+              ((symbol-function 'popterm--show)
+               (lambda (buf) (setq shown-buf buf)))
+              ((symbol-function 'popterm--send-cd) #'ignore))
+      (unwind-protect
+          (progn
+            (popterm-toggle)
+            (should (equal created-name "2"))
+            (should (buffer-live-p shown-buf)))
+        (when (buffer-live-p shown-buf)
+          (kill-buffer shown-buf))))))
+
+(ert-deftest popterm-test-toggle-single-buffer-no-completion ()
+  "Test single buffer toggle shows directly without completing-read."
+  (let ((buf (generate-new-buffer "*popterm-vterm-single*"))
+        (completing-read-called nil)
+        (shown-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--visible-p) (lambda () nil))
+                  ((symbol-function 'popterm--window-hide) #'ignore)
+                  ((symbol-function 'popterm--buffer-list)
+                   (lambda (_b) (list buf)))
+                  ((symbol-function 'popterm--show)
+                   (lambda (b) (setq shown-buf b)))
+                  ((symbol-function 'popterm--send-cd) #'ignore)
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _args)
+                     (setq completing-read-called t)
+                     "")))
+          (popterm-toggle)
+          (should (eq shown-buf buf))
+          (should-not completing-read-called))
+      (kill-buffer buf))))
+
+(ert-deftest popterm-test-toggle-multi-buffer-completion ()
+  "Test multiple buffers trigger completing-read."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (buf2 (generate-new-buffer "*popterm-vterm[2]*"))
+        (completing-read-called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--visible-p) (lambda () nil))
+                  ((symbol-function 'popterm--window-hide) #'ignore)
+                  ((symbol-function 'popterm--buffer-list)
+                   (lambda (_b) (list buf1 buf2)))
+                  ((symbol-function 'popterm--show) #'ignore)
+                  ((symbol-function 'popterm--send-cd) #'ignore)
+                  ((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _args)
+                     (setq completing-read-called t)
+                     (car collection)))
+                  ((symbol-function 'get-buffer)
+                   (lambda (name)
+                     (if (equal name (buffer-name buf1)) buf1 buf2))))
+          (popterm-toggle)
+          (should completing-read-called))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
+(ert-deftest popterm-test-next-popup-aware ()
+  "Test popterm-next calls show-in-place when popup is visible."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (buf2 (generate-new-buffer "*popterm-vterm[2]*"))
+        (popterm--frame-buffer nil)
+        (show-in-place-buf nil))
+    (unwind-protect
+        (progn
+          (setq popterm--frame-buffer buf1)
+          (cl-letf (((symbol-function 'popterm--buffer-list)
+                     (lambda (_b) (list buf1 buf2)))
+                    ((symbol-function 'popterm--visible-p) (lambda () t))
+                    ((symbol-function 'popterm--show-in-place)
+                     (lambda (buf) (setq show-in-place-buf buf)))
+                    ((symbol-function 'popterm--cycle-message) #'ignore))
+            (popterm-next)
+            (should (eq show-in-place-buf buf2))))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
+(ert-deftest popterm-test-prev-popup-aware ()
+  "Test popterm-prev calls show-in-place when popup is visible."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (buf2 (generate-new-buffer "*popterm-vterm[2]*"))
+        (popterm--frame-buffer nil)
+        (show-in-place-buf nil))
+    (unwind-protect
+        (progn
+          (setq popterm--frame-buffer buf1)
+          (cl-letf (((symbol-function 'popterm--buffer-list)
+                     (lambda (_b) (list buf1 buf2)))
+                    ((symbol-function 'popterm--visible-p) (lambda () t))
+                    ((symbol-function 'popterm--show-in-place)
+                     (lambda (buf) (setq show-in-place-buf buf)))
+                    ((symbol-function 'popterm--cycle-message) #'ignore))
+            (popterm-prev)
+            (should (eq show-in-place-buf buf2))))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
+(ert-deftest popterm-test-next-hidden-shows-popup ()
+  "Test popterm-next calls popterm--show when popup is hidden."
+  (let ((buf1 (generate-new-buffer "*popterm-vterm[1]*"))
+        (shown-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'popterm--buffer-list)
+                   (lambda (_b) (list buf1)))
+                  ((symbol-function 'popterm--visible-p) (lambda () nil))
+                  ((symbol-function 'popterm--show)
+                   (lambda (buf) (setq shown-buf buf)))
+                  ((symbol-function 'popterm--cycle-message) #'ignore))
+          (popterm-next)
+          (should (eq shown-buf buf1)))
+      (kill-buffer buf1))))
 
 ;;; ── Test Summary ──────────────────────────────────────────────────────────────
 
