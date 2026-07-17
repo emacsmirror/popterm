@@ -335,6 +335,11 @@ to ORIG with BUFFER-OR-NAME unchanged."
     map)
   "Keymap active in `popterm-mode' terminal buffers.")
 
+;; Keep this outside the `defvar' initializer so reloading Popterm updates an
+;; already-created keymap in the running Emacs session.
+(define-key popterm-term-map [remap ghostel-send-C-g]
+            #'popterm--ghostel-send-C-g)
+
 (defun popterm--keyboard-key-sequence-p (key)
   "Return non-nil when KEY is a keyboard key sequence vector."
   (and (vectorp key)
@@ -448,6 +453,7 @@ Popterm toggle keys to the buffer-local `vterm-keymap-exceptions'.
 (declare-function eshell "esh-mode" (&optional arg))
 (declare-function eshell-send-input "esh-mode" ())
 (declare-function ghostel "ghostel" ())
+(declare-function ghostel-send-C-g "ghostel" ())
 (declare-function ghostel-send-key "ghostel" (key))
 (declare-function posframe-hide "posframe" (buffer-or-name))
 (declare-function posframe-poshandler-frame-center "posframe" (info))
@@ -924,6 +930,35 @@ The guard is *not* triggered when:
                (setq found t)
              (setq parent (frame-parent parent))))
          found)))
+
+(defun popterm--dismiss-descendant-posframes ()
+  "Hide visible posframes parented below the active Popterm frame.
+
+A package such as `which-key-posframe' uses the selected frame as its
+parent.  When invoked inside Popterm, its popup therefore becomes a child
+of Popterm's child frame.  Hiding these transient descendants before
+Ghostel handles `C-g' prevents them from becoming stuck while preserving
+the terminal's own interrupt input."
+  (when (frame-live-p popterm--frame)
+    (dolist (frame (frame-list))
+      (when (and (not (eq frame popterm--frame))
+                 (frame-live-p frame)
+                 (frame-visible-p frame)
+                 (popterm--frame-descendant-p frame popterm--frame))
+        (let* ((posframe-buffer (frame-parameter frame 'posframe-buffer))
+               (buffer (cond
+                        ((bufferp posframe-buffer) posframe-buffer)
+                        ((consp posframe-buffer) (cdr posframe-buffer))
+                        ((stringp posframe-buffer)
+                         (get-buffer posframe-buffer)))))
+          (when (buffer-live-p buffer)
+            (posframe-hide buffer)))))))
+
+(defun popterm--ghostel-send-C-g ()
+  "Dismiss nested posframes, then send `C-g' to Ghostel's terminal."
+  (interactive)
+  (popterm--dismiss-descendant-posframes)
+  (ghostel-send-C-g))
 
 (defun popterm--delete-descendant-minibuffer-posframes ()
   "Delete stale minibuffer posframes parented below the Popterm frame.
